@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 2592004!?
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recsys_user -d bookdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  recsys:
+    build: .
+    ports:
+      - "8001:8001"
+    environment:
+      - DB_URI=postgresql://postgres:2592004!?@postgres:5432/postgres
+      - DB_SCHEMA=book_recommendation_system
+      - ALPHA=0.6
+    volumes:
+      - ./artifacts:/app/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Waiting for DB...' &&
+        sleep 5 &&
+        echo 'Training model...' &&
+        python train.py --evaluate &&
+        echo 'Starting API...' &&
+        uvicorn serve:app --host 0.0.0.0 --port 8001
+      "
+
+volumes:
+  postgres_data:
