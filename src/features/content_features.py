@@ -14,9 +14,9 @@ class ContentBasedModel:
         self.vectorizer = TfidfVectorizer(
             max_features=max_features,
             ngram_range=(1, 2),
-            min_df=2,
-            max_df=0.8,
-            strip_accents=None  # Keep Vietnamese diacritics
+            min_df=2,    #  Loại từ chỉ xuất hiện 1 lần
+            max_df=0.8,     #  Loại từ xuất hiện >80% (stop words)
+            strip_accents=None,  # Keep Vietnamese diacritics
         )
         self.feature_matrix = None
         self.book_ids = None

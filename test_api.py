@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from serve import app
+from server import app
 from src.models.hybrid import HybridRecommender
 from src.api import routes
 import pandas as pd
