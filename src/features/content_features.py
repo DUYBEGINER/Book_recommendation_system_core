@@ -10,11 +10,11 @@ from src.features.text_processor import TextProcessor
 from src.utils.logging_config import logger
 
 class ContentBasedModel:
-    def __init__(self, max_features: int = 5000):
+    def __init__(self, max_features: int = 10000):
         self.vectorizer = TfidfVectorizer(
             max_features=max_features,
             ngram_range=(1, 2),
-            min_df=2,    #  Loại từ chỉ xuất hiện 1 lần
+            min_df=1,    #  Loại từ chỉ xuất hiện 1 lần
             max_df=0.8,     #  Loại từ xuất hiện >80% (stop words)
             strip_accents=None,  # Keep Vietnamese diacritics
         )
@@ -33,6 +33,12 @@ class ContentBasedModel:
         # Fit TF-IDF
         self.feature_matrix = self.vectorizer.fit_transform(books_df['document'])
         self.book_ids = books_df['book_id'].values
+        df_tfidf = pd.DataFrame(
+            self.feature_matrix.toarray(),
+            index=self.book_ids,
+            columns=self.vectorizer.get_feature_names_out()
+        )
+        print(f"TF-IDF DataFrame head:\n{df_tfidf.head()}")
         self.id_to_idx = {bid: idx for idx, bid in enumerate(self.book_ids)}
         
         logger.info(f"Content features: {self.feature_matrix.shape}")

@@ -33,7 +33,7 @@ class DatabaseLoader:
         
         with self.engine.connect() as conn:
             df = pd.read_sql(text(query), conn)
-        
+        print(f"Books DataFrame head:\n{df.head()}")
         logger.info(f"Loaded {len(df)} books")
         return df
     
@@ -53,7 +53,7 @@ class DatabaseLoader:
         
         with self.engine.connect() as conn:
             df = pd.read_sql(text(query), conn)
-        
+        print(f"Interactions DataFrame head:\n{df.head()}")
         logger.info(f"Loaded {len(df)} interactions")
         return df
     
