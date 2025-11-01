@@ -59,7 +59,7 @@ class DatabaseLoader:
         SELECT user_id, book_id, created_at AS ts, rating_value::float AS strength, 'rating' AS type
         FROM {self.schema}.ratings
         UNION ALL
-        SELECT user_id, book_id, lgitast_read_at AS ts, COALESCE(progress/100.0, 1.0)::float AS strength, 'history' AS type
+        SELECT user_id, book_id, last_read_at AS ts, COALESCE(progress/100.0, 1.0)::float AS strength, 'history' AS type
         FROM {self.schema}.reading_history
         UNION ALL
         SELECT user_id, book_id, added_at AS ts, 3.0 AS strength, 'favorite' AS type

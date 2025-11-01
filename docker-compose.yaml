@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: 2592004!?
+      POSTGRES_PASSWORD: 123
     ports:
       - "5432:5432"
     volumes:
@@ -23,7 +23,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - DB_URI=postgresql://postgres:2592004!?@postgres:5432/postgres
+      - DB_URI=postgresql://postgres:123!?@postgres:5432/postgres
       - DB_SCHEMA=book_recommendation_system
       - ALPHA=0.6
     volumes:
