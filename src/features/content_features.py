@@ -8,15 +8,23 @@ import pickle
 from pathlib import Path
 from src.features.text_processor import TextProcessor
 from src.utils.logging_config import logger
+from underthesea import word_tokenize
+
+def vi_tokenizer(text: str):
+    # Trả về list token đã tách từ, có thể nối cụm bằng dấu gạch dưới
+    return word_tokenize(text, format="text").split()
 
 class ContentBasedModel:
     def __init__(self, max_features: int = 10000):
         self.vectorizer = TfidfVectorizer(
-            max_features=max_features,
+            tokenizer=vi_tokenizer,
+            preprocessor=None,          # bỏ preprocessor mặc định
+            token_pattern=None,         # bắt buộc khi dùng tokenizer tùy biến
+            # max_features=max_features,
             ngram_range=(1, 2),
             min_df=2,    #  Loại từ chỉ xuất hiện 1 lần
             max_df=0.8,     #  Loại từ xuất hiện >80% (stop words)
-            strip_accents=None,  # Keep Vietnamese diacritics
+            # strip_accents=None,  # Keep Vietnamese diacritics
         )
         self.feature_matrix = None
         self.book_ids = None

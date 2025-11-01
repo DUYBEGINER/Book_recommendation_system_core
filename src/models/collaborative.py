@@ -62,7 +62,8 @@ class CollaborativeModel:
         self.item_user_matrix = self.user_item_matrix.T.tocsr()
         # print("Item-User Matrix:", self.item_user_matrix)
         # Train with item-user matrix (items × users)
-        self.model.fit(self.user_item_matrix)
+        # self.model.fit(self.user_item_matrix)
+        self.model.fit(self.item_user_matrix)  # items × users ✅
         
         logger.info(f"CF matrix: {self.user_item_matrix.shape}, nnz={self.user_item_matrix.nnz}")
     

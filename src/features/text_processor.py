@@ -1,11 +1,7 @@
 from typing import List
 import re
 import unicodedata
-from underthesea import word_tokenize
 
-def vi_tokenizer(text: str):
-    # Trả về list token đã tách từ, có thể nối cụm bằng dấu gạch dưới
-    return word_tokenize(text, format="text").split()
 
 class TextProcessor:
     """Process text for content-based filtering, handling Vietnamese diacritics"""
