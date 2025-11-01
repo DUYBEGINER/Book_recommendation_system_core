@@ -24,7 +24,7 @@ class HybridRecommender:
         # Train content model
         self.content_model = ContentBasedModel()
         self.content_model.fit(books_df)
-        
+        print("Content feature matrix shape:", self.content_model.feature_matrix.shape)
         # Train CF model
         self.cf_model = CollaborativeModel()
         self.cf_model.fit(interactions_df)
@@ -36,6 +36,7 @@ class HybridRecommender:
         # Get user's interaction history for filtering
         user_history = set()
         if self.interactions_df is not None:
+            logger.warning("Content model or interactions data available.")
             user_books = self.interactions_df[self.interactions_df['user_id'] == user_id]['book_id'].unique()
             user_history = set(user_books)
         
@@ -45,18 +46,20 @@ class HybridRecommender:
             # Request more items for better blending, but CF model will handle safe limit
             cf_results = self.cf_model.recommend(user_id, top_k=max(limit * 2, limit), filter_items=user_history)
         
+
         # If new user (no CF), fallback to popularity
         if not cf_results:
+            logger.warning(f"No CF results for user {user_id}, falling back to popularity")
             return self._popularity_fallback(user_id, limit, user_history)
-        
+
+        logger.info(f"result {cf_results}")
         # Get content scores for CF candidates
         hybrid_scores = []
         for book_id, cf_score in cf_results[:limit*2]:
             content_score = self._get_content_score_for_user(user_id, book_id)
-            
             # Hybrid blend
             final_score = self.alpha * cf_score + (1 - self.alpha) * content_score
-            
+            logger.debug(f"User {user_id}, Book {book_id}: CF={cf_score:.4f}, Content={content_score:.4f}, Hybrid={final_score:.4f}")
             hybrid_scores.append({
                 'book_id': int(book_id),
                 'score': float(final_score),
@@ -82,6 +85,7 @@ class HybridRecommender:
     def _get_content_score_for_user(self, user_id: int, book_id: int) -> float:
         """Compute content score based on user's past preferences"""
         if not self.content_model or self.interactions_df is None:
+            logger.warning("Content model or interactions data not available.")
             return 0.0
         
         # Get user's past books

@@ -17,7 +17,6 @@ class DatabaseLoader:
         SELECT
             b.book_id,
             b.title,
-            b.description,
             b.publisher,
             b.publication_year,
             COALESCE(string_agg(DISTINCT a.author_name, ' '), '') AS authors_text,
@@ -28,8 +27,25 @@ class DatabaseLoader:
         LEFT JOIN {self.schema}.book_genres bg ON bg.book_id = b.book_id
         LEFT JOIN {self.schema}.genres g ON g.genre_id = bg.genre_id
         WHERE b.is_deleted = FALSE
-        GROUP BY b.book_id, b.title, b.description, b.publisher, b.publication_year
+        GROUP BY b.book_id, b.title, b.publisher, b.publication_year
         """
+        # query = f"""
+        # SELECT
+        #     b.book_id,
+        #     b.title,
+        #     b.description,
+        #     b.publisher,
+        #     b.publication_year,
+        #     COALESCE(string_agg(DISTINCT a.author_name, ' '), '') AS authors_text,
+        #     COALESCE(string_agg(DISTINCT g.genre_name, ' '), '') AS genres_text
+        # FROM {self.schema}.books b
+        # LEFT JOIN {self.schema}.book_authors ba ON ba.book_id = b.book_id
+        # LEFT JOIN {self.schema}.authors a ON a.author_id = ba.author_id
+        # LEFT JOIN {self.schema}.book_genres bg ON bg.book_id = b.book_id
+        # LEFT JOIN {self.schema}.genres g ON g.genre_id = bg.genre_id
+        # WHERE b.is_deleted = FALSE
+        # GROUP BY b.book_id, b.title, b.description, b.publisher, b.publication_year
+        # """
         
         with self.engine.connect() as conn:
             df = pd.read_sql(text(query), conn)

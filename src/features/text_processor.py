@@ -26,7 +26,7 @@ class TextProcessor:
         """Build searchable document from book metadata"""
         parts = [
             str(row.get('title', '')),
-            str(row.get('description', '')),
+            # str(row.get('description', '')),
             str(row.get('authors_text', '')),
             str(row.get('genres_text', '')),
             str(row.get('publisher', '')),
