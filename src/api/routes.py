@@ -1,13 +1,17 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from src.api.schemas import *
 from src.models.hybrid import HybridRecommender
+from src.data.db_loader import DatabaseLoader
+from src.utils.config import get_settings
 from src.utils.logging_config import logger
 from pathlib import Path
+from typing import Optional
 
 router = APIRouter()
 
 # Global model instance (loaded at startup)
 recommender: Optional[HybridRecommender] = None
+is_retraining: bool = False  # Track retraining status
 
 def get_recommender():
     global recommender
@@ -19,7 +23,7 @@ def get_recommender():
 async def health_check():
     """Health check endpoint"""
     return HealthResponse(
-        status="ok",
+        status="retraining" if is_retraining else "ok",
         models_loaded=recommender is not None
     )
 
@@ -59,14 +63,87 @@ async def record_feedback(request: FeedbackRequest):
     logger.info(f"Feedback: user={request.user_id}, book={request.book_id}, event={request.event}")
     return {"status": "recorded"}
 
+@router.get("/model/info")
+async def get_model_info():
+    """Get information about current loaded model"""
+    rec = get_recommender()
+    
+    info = {
+        "status": "loaded",
+        "alpha": rec.alpha,
+        "cf_model": {
+            "num_users": len(rec.cf_model.user_ids) if rec.cf_model else 0,
+            "num_items": len(rec.cf_model.item_ids) if rec.cf_model else 0,
+            "matrix_nnz": rec.cf_model.user_item_matrix.nnz if rec.cf_model else 0
+        } if rec.cf_model else None,
+        "content_model": {
+            "num_books": len(rec.content_model.book_ids) if rec.content_model else 0,
+            "feature_dim": rec.content_model.feature_matrix.shape[1] if rec.content_model else 0
+        } if rec.content_model else None,
+        "is_retraining": is_retraining
+    }
+    
+    return info
+
 @router.post("/retrain")
 async def trigger_retrain(background_tasks: BackgroundTasks):
     """Trigger model retraining (admin endpoint)"""
-    # In production, add authentication
+    global is_retraining
+    
+    # Check if already retraining
+    if is_retraining:
+        raise HTTPException(status_code=409, detail="Retraining already in progress")
+    
+    # In production, add authentication here
+    # e.g., check API key or JWT token
+    
     background_tasks.add_task(retrain_models)
-    return {"status": "retraining scheduled"}
+    return {
+        "status": "accepted",
+        "message": "Model retraining started in background. Check /health for status."
+    }
 
-def retrain_models():
+async def retrain_models():
     """Background task to retrain models"""
-    # This would be called by train.py in production
-    logger.info("Retraining models...")
+    global recommender, is_retraining
+    
+    is_retraining = True
+    
+    try:
+        logger.info("🔄 Starting model retraining...")
+        settings = get_settings()
+        
+        # 1. Load fresh data from database
+        logger.info("📊 Loading data from database...")
+        loader = DatabaseLoader(settings.db_uri, settings.db_schema)
+        books_df, interactions_df = loader.load_all()
+        
+        logger.info(f"Loaded {len(books_df)} books, {len(interactions_df)} interactions")
+        logger.info(f"Unique users: {interactions_df['user_id'].nunique()}")
+        
+        if len(books_df) == 0 or len(interactions_df) == 0:
+            logger.error("❌ Insufficient data for retraining")
+            return
+        
+        # 2. Train new model
+        logger.info("🤖 Training new hybrid model...")
+        new_recommender = HybridRecommender(alpha=settings.alpha)
+        new_recommender.train(books_df, interactions_df)
+        
+        # 3. Save new model
+        artifacts_dir = Path(settings.artifacts_dir)
+        logger.info(f"💾 Saving new model to {artifacts_dir}...")
+        new_recommender.save(artifacts_dir)
+        
+        # 4. Replace old model in memory (hot-swap)
+        logger.info("♻️ Replacing old model with new model...")
+        recommender = new_recommender
+        
+        logger.info("✅ Model retraining completed successfully!")
+        
+    except Exception as e:
+        logger.error(f"❌ Retraining failed: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        is_retraining = False
