@@ -11,14 +11,14 @@ from src.models.hybrid import HybridRecommender
 from src.utils.config import get_settings
 from src.utils.logging_config import logger
 
-def compute_metrics(recommender: HybridRecommender, interactions_df: pd.DataFrame, k: int = 10):
-    """Compute HR@K and NDCG@K on holdout set"""
+def compute_metrics(recommender: HybridRecommender, test_df: pd.DataFrame, k: int = 10):
+    """Compute HR@K and NDCG@K on test set
     
-    # Split by timestamp (last 20% as test)
-    interactions_sorted = interactions_df.sort_values('ts')
-    split_idx = int(len(interactions_sorted) * 0.8)
-    train_df = interactions_sorted.iloc[:split_idx]
-    test_df = interactions_sorted.iloc[split_idx:]
+    Args:
+        recommender: Trained recommender (already trained on train set)
+        test_df: Test interactions (holdout set)
+        k: Number of recommendations
+    """
     
     # Group test by user
     test_grouped = test_df.groupby('user_id')['book_id'].apply(set).to_dict()
@@ -27,17 +27,33 @@ def compute_metrics(recommender: HybridRecommender, interactions_df: pd.DataFram
     ndcg_scores = []
     users_evaluated = 0
     
+    logger.info(f"Evaluating on {len(test_grouped)} users from test set")
+    
     for user_id, true_items in test_grouped.items():
         if len(true_items) == 0:
             continue
         
+        # Skip users not in training set (cold start users in test)
+        if recommender.cf_model and user_id not in recommender.cf_model.user_id_map:
+            logger.debug(f"Skipping cold-start user {user_id} (not in training set)")
+            continue
+        
         # Get recommendations
-        recs = recommender.recommend(user_id, limit=k)
-        rec_items = [r['book_id'] for r in recs]
+        try:
+            recs = recommender.recommend(user_id, limit=k)
+            rec_items = [r['book_id'] for r in recs]
+        except Exception as e:
+            logger.warning(f"Error getting recommendations for user {user_id}: {e}")
+            continue
+        
+        if len(rec_items) == 0:
+            continue
         
         # Hit rate
-        if any(item in true_items for item in rec_items):
+        hit = any(item in true_items for item in rec_items)
+        if hit:
             hits += 1
+            logger.debug(f"HIT for user {user_id}: recommended {rec_items[:3]}, true items {list(true_items)[:3]}")
         
         # NDCG
         relevance = [1 if item in true_items else 0 for item in rec_items]
@@ -50,6 +66,8 @@ def compute_metrics(recommender: HybridRecommender, interactions_df: pd.DataFram
     
     hr = hits / users_evaluated if users_evaluated > 0 else 0
     avg_ndcg = np.mean(ndcg_scores) if ndcg_scores else 0
+    
+    logger.info(f"Evaluated {users_evaluated} users, {hits} hits")
     
     return {
         'HR@K': hr,
@@ -111,26 +129,42 @@ def main():
             shutil.rmtree(artifacts_dir)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
     
-    # Train hybrid model
-    recommender = HybridRecommender(alpha=alpha)
-    recommender.train(books_df, interactions_df)
+    # Split data for evaluation (if --evaluate flag is set)
+    if args.evaluate:
+        logger.info("Creating train/test split for evaluation...")
+        interactions_sorted = interactions_df.sort_values('ts')
+        split_idx = int(len(interactions_sorted) * 0.8)
+        train_interactions = interactions_sorted.iloc[:split_idx].copy()
+        test_interactions = interactions_sorted.iloc[split_idx:].copy()
+        
+        logger.info(f"Train: {len(train_interactions)} interactions, Test: {len(test_interactions)} interactions")
+        
+        # Train on 80% only
+        recommender = HybridRecommender(alpha=alpha)
+        recommender.train(books_df, train_interactions)
+    else:
+        # Train on all data (production mode)
+        train_interactions = interactions_df
+        test_interactions = None
+        recommender = HybridRecommender(alpha=alpha)
+        recommender.train(books_df, interactions_df)
     
     # Evaluate
     if args.evaluate:
-        logger.info("Evaluating model...")
+        logger.info("Evaluating model on test set...")
         
         # Validate model matches data
         if recommender.cf_model:
             model_users = set(recommender.cf_model.user_ids)
-            data_users = set(interactions_df['user_id'].unique())
-            missing_users = data_users - model_users
-            if missing_users:
-                logger.warning(f"Model missing {len(missing_users)} users from current data")
+            test_users = set(test_interactions['user_id'].unique())
+            common_users = model_users & test_users
+            logger.info(f"Model has {len(model_users)} users, test has {len(test_users)} users, {len(common_users)} in common")
         
         try:
-            metrics_5 = compute_metrics(recommender, interactions_df, k=5)
-            metrics_10 = compute_metrics(recommender, interactions_df, k=10)
-            coverage = compute_coverage(recommender, interactions_df)
+            # Pass test_interactions to evaluate
+            metrics_5 = compute_metrics(recommender, test_interactions, k=5)
+            metrics_10 = compute_metrics(recommender, test_interactions, k=10)
+            coverage = compute_coverage(recommender, train_interactions)
             
             logger.info(f"Metrics @5: HR={metrics_5['HR@K']:.4f}, NDCG={metrics_5['NDCG@K']:.4f}")
             logger.info(f"Metrics @10: HR={metrics_10['HR@K']:.4f}, NDCG={metrics_10['NDCG@K']:.4f}")
@@ -138,7 +172,13 @@ def main():
             logger.info(f"Users evaluated: {metrics_10['users_evaluated']}")
         except Exception as e:
             logger.error(f"Evaluation failed: {e}")
+            import traceback
+            traceback.print_exc()
             logger.warning("Skipping evaluation, but model is saved")
+        
+        # Save model trained on train set only (for evaluation purposes)
+        # In production, you'd retrain on full data after validation
+        logger.info("Note: Model trained on 80% data for evaluation. Retrain on full data for production.")
     
     # Save models
     recommender.save(artifacts_dir)
