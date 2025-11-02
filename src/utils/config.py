@@ -4,7 +4,7 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     # Database
-    db_uri: str = "postgresql://postgres:2592004!?@localhost:5432/postgres"
+    db_uri: str = "postgresql://postgres:123@localhost:5432/recommendation_book_system_db"
     db_schema: str = "book_recommendation_system"
     
     # Model parameters
