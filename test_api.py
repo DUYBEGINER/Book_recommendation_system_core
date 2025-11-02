@@ -32,6 +32,10 @@ def test_similar_endpoint(client, mock_model):
     response = client.get("/api/v1/similar?book_id=1&limit=5")
     assert response.status_code in [200, 503]
 
+def test_diversity_endpoint(client, mock_model):
+    response = client.get("/api/v1/diversity?book_id=1&limit=3")
+    assert response.status_code in [200, 404, 503]
+
 def test_feedback_endpoint(client):
     payload = {
         "user_id": 1,

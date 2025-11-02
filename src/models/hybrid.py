@@ -4,6 +4,7 @@ import pandas as pd
 from pathlib import Path
 from src.models.collaborative import CollaborativeModel
 from src.features.content_features import ContentBasedModel
+from src.models.diversity import DiversityRecommender
 from src.utils.logging_config import logger
 
 class HybridRecommender:
@@ -11,6 +12,7 @@ class HybridRecommender:
         self.alpha = alpha  # CF weight
         self.cf_model: Optional[CollaborativeModel] = None
         self.content_model: Optional[ContentBasedModel] = None
+        self.diversity_model: Optional[DiversityRecommender] = None
         self.books_df: Optional[pd.DataFrame] = None
         self.interactions_df: Optional[pd.DataFrame] = None
     
@@ -28,6 +30,8 @@ class HybridRecommender:
         # Train CF model
         self.cf_model = CollaborativeModel()
         self.cf_model.fit(interactions_df)
+
+        self._build_diversity_model()
         
         logger.info("Hybrid model trained")
     
@@ -73,6 +77,33 @@ class HybridRecommender:
         # Sort and return top K
         hybrid_scores.sort(key=lambda x: x['score'], reverse=True)
         return hybrid_scores[:limit]
+
+    def diversity_recommendations(
+        self,
+        book_id: int,
+        limit: int = 5,
+    ) -> Dict[str, List[Dict]]:
+        """Return diverse recommendations for the provided book."""
+        if not self.diversity_model:
+            raise RuntimeError("Diversity model not initialized")
+
+        results = self.diversity_model.recommend(
+            book_id=book_id,
+            limit=limit,
+        )
+
+        return {
+            'book_id': int(book_id),
+            'items': [
+                {
+                    'book_id': int(item.book_id),
+                    'rating': float(item.rating),
+                    'score': float(item.score),
+                    'metadata': {k: float(v) for k, v in item.metadata.items()} if item.metadata else {},
+                }
+                for item in results
+            ],
+        }
     
     def similar_books(self, book_id: int, limit: int = 10) -> List[Dict]:
         """Content-based similar books"""
@@ -166,6 +197,55 @@ class HybridRecommender:
             model.books_df = pd.read_pickle(books_path)
         if interactions_path.exists():
             model.interactions_df = pd.read_pickle(interactions_path)
+
+        model._build_diversity_model()
         
         logger.info(f"Loaded hybrid model from {artifacts_dir}")
         return model
+
+    def _build_diversity_model(self):
+        """Initialize diversity recommender if data is available."""
+        if self.books_df is None:
+            logger.warning("Cannot initialize diversity model without books data")
+            self.diversity_model = None
+            return
+
+        try:
+            embeddings = None
+            if (
+                self.content_model
+                and self.content_model.feature_matrix is not None
+                and self.content_model.book_ids is not None
+            ):
+                try:
+                    feature_matrix = self.content_model.feature_matrix.detach().cpu().numpy()
+                    content_ids = [int(bid) for bid in self.content_model.book_ids]
+                    id_to_idx = {bid: idx for idx, bid in enumerate(content_ids)}
+
+                    ordered_vectors = []
+                    missing_ids = []
+                    for bid in self.books_df["book_id"].astype(int):
+                        idx = id_to_idx.get(int(bid))
+                        if idx is None:
+                            missing_ids.append(int(bid))
+                            continue
+                        ordered_vectors.append(feature_matrix[idx])
+
+                    if missing_ids:
+                        logger.warning(
+                            "Diversity embeddings missing for %d books. Falling back to TF-IDF for those entries.",
+                            len(missing_ids),
+                        )
+                    if ordered_vectors and len(ordered_vectors) == len(self.books_df):
+                        embeddings = np.vstack(ordered_vectors)
+                except Exception as embedding_exc:
+                    logger.warning(f"Failed to prepare SBERT embeddings for diversity: {embedding_exc}")
+
+            self.diversity_model = DiversityRecommender(
+                books_df=self.books_df,
+                interactions_df=self.interactions_df,
+                embeddings=embeddings,
+            )
+        except Exception as exc:
+            logger.error(f"Failed to initialize diversity model: {exc}")
+            self.diversity_model = None
