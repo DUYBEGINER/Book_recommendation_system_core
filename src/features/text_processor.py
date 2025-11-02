@@ -12,6 +12,11 @@ class TextProcessor:
         if not text:
             return ""
         text = text.lower().strip()
+        
+        # Remove punctuation and special characters, keep only letters, numbers, spaces
+        # Keep Vietnamese characters: à á ả ã ạ ă ắ ằ ẳ ẵ ặ â ấ ầ ẩ ẫ ậ đ è é ẻ ẽ ẹ ê ế ề ể ễ ệ...
+        text = re.sub(r'[^\w\s]', ' ', text, flags=re.UNICODE)
+        
         # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text)
         return text
@@ -38,6 +43,6 @@ class TextProcessor:
         
         # Keep Vietnamese + add ASCII version for recall
         normalized = TextProcessor.normalize_text(text)
-        ascii_folded = TextProcessor.remove_diacritics(normalized)
+        # ascii_folded = TextProcessor.remove_diacritics(normalized)
         
-        return f"{normalized} {ascii_folded}"
+        return f"{normalized}"

@@ -8,6 +8,7 @@ import pandas as pd
 from src.models.collaborative import CollaborativeModel
 from src.features.content_features import ContentBasedModel
 from src.utils.logging_config import logger
+from src.features.content_features_Ridge import RidgeContentModel
 
 class HybridRecommender:
     """
@@ -17,36 +18,44 @@ class HybridRecommender:
     3. Popularity fallback
     """
     
-    def __init__(self, alpha: float = 0.6):
+    def __init__(self, alpha: float = 0.6, use_ridge: bool = True, ridge_alpha: float = 1.0):
         """
         Args:
-            alpha: Weight for CF (0-1). CBF weight = 1 - alpha
+            alpha: Weight for CF vs Content
+            use_ridge: Use Ridge regression (True) or weighted average (False)
+            ridge_alpha: Ridge regularization parameter
         """
         self.alpha = alpha
+        self.use_ridge = use_ridge
+        self.ridge_alpha = ridge_alpha
+        
         self.cf_model = None
         self.content_model = None
         self.popularity = None
     
     def train(self, books_df: pd.DataFrame, interactions_df: pd.DataFrame):
         """Train both CF and Content models"""
-        logger.info("Training hybrid recommender...")
+        logger.info(f"Training hybrid recommender (Ridge={self.use_ridge})...")
         
         # 1. Content-Based Model
-        logger.info("Building content-based features...")
-        self.content_model = ContentBasedModel()
-        self.content_model.fit(books_df)
+        if self.use_ridge:
+            logger.info("Using Ridge Regression for content-based...")
+            self.content_model = RidgeContentModel(alpha=self.ridge_alpha)
+            self.content_model.fit(books_df)
+            self.content_model.train_user_models(interactions_df, min_interactions=5)
+        else:
+            logger.info("Using weighted average for content-based...")
+            from src.features.content_features import ContentBasedModel
+            self.content_model = ContentBasedModel()
+            self.content_model.fit(books_df)
+            self.content_model.build_user_profiles(interactions_df)
         
-        # 2. Build user profiles from interactions
-        self.content_model.build_user_profiles(interactions_df)
-        
-        # 3. Collaborative Filtering
+        # 2. CF and popularity (same as before)
         logger.info("Training collaborative filtering model...")
         self.cf_model = CollaborativeModel(factors=64, iterations=30)
         self.cf_model.fit(interactions_df)
         
-        # 4. Popularity baseline
         self._compute_popularity(interactions_df)
-        
         logger.info("Hybrid model trained")
     
     def _compute_popularity(self, interactions_df: pd.DataFrame):
@@ -94,19 +103,35 @@ class HybridRecommender:
         else:
             logger.debug(f"No CF results for user {user_id}, user not in training set")
         
-        # 2. Content-Based Filtering (using User Profile)
-        if self.content_model and user_id in self.content_model.user_profiles:
-            try:
-                content_results = self.content_model.recommend_for_user(
-                    user_id,
-                    top_k=limit * 2,
-                    filter_items=interacted_items
-                )
-                logger.debug(f"Content returned {len(content_results)} results for user {user_id}")
-            except Exception as e:
-                logger.warning(f"Content-based failed for user {user_id}: {e}")
+        # 2. Content-Based Filtering (using User Profile or Ridge Model)
+        if self.use_ridge:
+            # Ridge model: check user_models
+            if self.content_model and user_id in self.content_model.user_models:
+                try:
+                    content_results = self.content_model.recommend_for_user(
+                        user_id,
+                        top_k=limit * 2,
+                        filter_items=interacted_items
+                    )
+                    logger.debug(f"Ridge returned {len(content_results)} results for user {user_id}")
+                except Exception as e:
+                    logger.warning(f"Ridge failed for user {user_id}: {e}")
+            else:
+                logger.debug(f"No Ridge model for user {user_id}")
         else:
-            logger.debug(f"No content profile for user {user_id}")
+            # Weighted average: check user_profiles
+            if self.content_model and user_id in self.content_model.user_profiles:
+                try:
+                    content_results = self.content_model.recommend_for_user(
+                        user_id,
+                        top_k=limit * 2,
+                        filter_items=interacted_items
+                    )
+                    logger.debug(f"Content returned {len(content_results)} results for user {user_id}")
+                except Exception as e:
+                    logger.warning(f"Content-based failed for user {user_id}: {e}")
+            else:
+                logger.debug(f"No content profile for user {user_id}")
         
         # 3. Combine CF + Content with weighted average
         if cf_results or content_results:
@@ -115,9 +140,9 @@ class HybridRecommender:
                 {
                     'book_id': book_id,
                     'score': score,
-                    'source': 'hybrid'
+                    'reasons': reasons
                 }
-                for book_id, score in combined[:limit]
+                for book_id, score, reasons in combined[:limit]
             ]
             
             logger.info(f"Hybrid: {len(cf_results)} CF + {len(content_results)} Content -> {len(results)} final")
@@ -125,10 +150,17 @@ class HybridRecommender:
         
         # 4. Fallback to popularity
         logger.warning(f"No CF or Content results for user {user_id}, falling back to popularity")
-        return self._get_popularity_recommendations(limit, exclude=interacted_items)
+        pop_results = self._get_popularity_recommendations(limit, exclude=interacted_items)
+        
+        # Add reasons for popularity fallback
+        for item in pop_results:
+            item['reasons'] = {'cf': 0.0, 'content': 0.0, 'pop': item['score']}
+            del item['source']  # Remove old 'source' field
+        
+        return pop_results
     
     def _combine_scores(self, cf_results: List[Tuple[int, float]], 
-                       content_results: List[Tuple[int, float]]) -> List[Tuple[int, float]]:
+                       content_results: List[Tuple[int, float]]) -> List[Tuple[int, float, dict]]:
         """
         Combine CF and Content scores with weighted average
         
@@ -139,7 +171,7 @@ class HybridRecommender:
             content_results: List of (book_id, content_score)
         
         Returns:
-            Combined list sorted by final score
+            Combined list of (book_id, final_score, reasons_dict) sorted by final score
         """
         # Normalize scores to [0, 1] range
         cf_dict = self._normalize_scores(cf_results)
@@ -156,7 +188,14 @@ class HybridRecommender:
             # Weighted average
             final_score = self.alpha * cf_score + (1 - self.alpha) * content_score
             
-            combined.append((book_id, final_score))
+            # Build reasons breakdown
+            reasons = {
+                'cf': float(cf_score),
+                'content': float(content_score),
+                'pop': 0.0
+            }
+            
+            combined.append((book_id, final_score, reasons))
         
         # Sort by score
         combined.sort(key=lambda x: x[1], reverse=True)
@@ -244,18 +283,20 @@ class HybridRecommender:
         if self.content_model:
             self.content_model.save(artifacts_dir / 'content_model.pkl')
         
-        # Save hybrid metadata
+        # Save hybrid metadata including use_ridge flag
         import pickle
         with open(artifacts_dir / 'hybrid_metadata.pkl', 'wb') as f:
             pickle.dump({
                 'alpha': self.alpha,
-                'popularity': self.popularity
+                'popularity': self.popularity,
+                'use_ridge': self.use_ridge,  # ✅ Save model type
+                'ridge_alpha': self.ridge_alpha
             }, f)
         
-        logger.info(f"Saved hybrid model to {artifacts_dir}")
+        logger.info(f"Saved hybrid model to {artifacts_dir} (Ridge={self.use_ridge})")
     
     @classmethod
-    def load(cls, artifacts_dir: Path, alpha: float = None):
+    def load(cls, artifacts_dir: Path, alpha: float = None, use_ridge: bool = None):
         """Load saved models"""
         # Load metadata
         metadata_path = artifacts_dir / 'hybrid_metadata.pkl'
@@ -264,24 +305,48 @@ class HybridRecommender:
             with open(metadata_path, 'rb') as f:
                 metadata = pickle.load(f)
             alpha = alpha or metadata.get('alpha', 0.6)
+            use_ridge = use_ridge if use_ridge is not None else metadata.get('use_ridge', False)
+            ridge_alpha = metadata.get('ridge_alpha', 1.0)
             popularity = metadata.get('popularity')
         else:
             alpha = alpha or 0.6
+            use_ridge = use_ridge if use_ridge is not None else False
+            ridge_alpha = 1.0
             popularity = None
         
-        model = cls(alpha=alpha)
+        model = cls(alpha=alpha, use_ridge=use_ridge, ridge_alpha=ridge_alpha)
         
         # Load CF model
         cf_path = artifacts_dir / 'cf_model.pkl'
         if cf_path.exists():
             model.cf_model = CollaborativeModel.load(cf_path)
         
-        # Load Content model
+        # Load Content model (auto-detect type)
         content_path = artifacts_dir / 'content_model.pkl'
         if content_path.exists():
-            model.content_model = ContentBasedModel.load(content_path)
+            # Try to detect model type from file
+            import pickle
+            with open(content_path, 'rb') as f:
+                data = pickle.load(f)
+            
+            # Check if it's Ridge model (has user_models) or Weighted (has user_profiles)
+            if 'user_models' in data:
+                # Ridge model
+                from src.features.content_features_Ridge import RidgeContentModel
+                model.content_model = RidgeContentModel.load(content_path)
+                model.use_ridge = True
+                logger.info("Loaded Ridge content model")
+            elif 'user_profiles' in data:
+                # Weighted average model
+                model.content_model = ContentBasedModel.load(content_path)
+                model.use_ridge = False
+                logger.info("Loaded weighted average content model")
+            else:
+                logger.warning("Unknown content model format")
         
         model.popularity = popularity
+        
+        logger.info(f"Loaded hybrid model (alpha={model.alpha}, use_ridge={model.use_ridge})")
         
         return model
 

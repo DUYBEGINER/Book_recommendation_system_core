@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from src.api.schemas import *
-from src.models.hybrid import HybridRecommender
+from src.models.hybrid_Ridge import HybridRecommender
 from src.data.db_loader import DatabaseLoader
 from src.utils.config import get_settings
 from src.utils.logging_config import logger
@@ -101,6 +101,55 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     return {
         "status": "accepted",
         "message": "Model retraining started in background. Check /health for status."
+    }
+
+@router.get("/user/profile/{user_id}")
+async def get_user_profile(user_id: int):
+    """
+    Get user's content profile (interests/keywords)
+    
+    Useful for:
+    - Explainability: "We recommend this because you like [keywords]"
+    - User dashboard: Show user's detected interests
+    """
+    rec = get_recommender()
+    
+    if not rec.content_model:
+        raise HTTPException(status_code=503, detail="Content model not loaded")
+    
+    keywords = rec.get_user_profile_keywords(user_id, top_n=20)
+    
+    if not keywords:
+        raise HTTPException(status_code=404, detail=f"No profile found for user {user_id}")
+    
+    return {
+        "user_id": user_id,
+        "keywords": [
+            {"keyword": kw, "weight": float(weight)}
+            for kw, weight in keywords
+        ]
+    }
+
+@router.get("/user/interactions/{user_id}")
+async def get_user_interactions(user_id: int):
+    """Get user's interaction history (for debugging/explainability)"""
+    rec = get_recommender()
+    
+    if not rec.content_model:
+        raise HTTPException(status_code=503, detail="Content model not loaded")
+    
+    interactions = rec.content_model.user_interactions.get(user_id, {})
+    
+    if not interactions:
+        raise HTTPException(status_code=404, detail=f"No interactions for user {user_id}")
+    
+    return {
+        "user_id": user_id,
+        "interactions": [
+            {"book_id": book_id, "strength": strength}
+            for book_id, strength in sorted(interactions.items(), 
+                                           key=lambda x: x[1], reverse=True)
+        ]
     }
 
 async def retrain_models():

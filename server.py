@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from src.api.routes import router, recommender as global_recommender
-from src.models.hybrid import HybridRecommender
+from src.models.hybrid_Ridge import HybridRecommender
 from src.utils.config import get_settings
 from src.utils.logging_config import logger
 from pathlib import Path

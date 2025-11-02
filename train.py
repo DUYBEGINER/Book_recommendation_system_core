@@ -7,7 +7,7 @@ import numpy as np
 from sklearn.metrics import ndcg_score
 
 from src.data.db_loader import DatabaseLoader
-from src.models.hybrid import HybridRecommender
+from src.models.hybrid_Ridge import HybridRecommender
 from src.utils.config import get_settings
 from src.utils.logging_config import logger
 
@@ -140,13 +140,13 @@ def main():
         logger.info(f"Train: {len(train_interactions)} interactions, Test: {len(test_interactions)} interactions")
         
         # Train on 80% only
-        recommender = HybridRecommender(alpha=alpha)
+        recommender = HybridRecommender(alpha=alpha, use_ridge=True, ridge_alpha=1.0)
         recommender.train(books_df, train_interactions)
     else:
         # Train on all data (production mode)
         train_interactions = interactions_df
         test_interactions = None
-        recommender = HybridRecommender(alpha=alpha)
+        recommender = HybridRecommender(alpha=alpha, use_ridge=True, ridge_alpha=1.0)
         recommender.train(books_df, interactions_df)
     
     # Evaluate
