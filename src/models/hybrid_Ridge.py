@@ -11,6 +11,7 @@ from collections import deque
 
 from src.models.collaborative import CollaborativeModel
 from src.features.content_features import ContentBasedModel
+from src.models.diversity import DiversityRecommender
 from src.utils.logging_config import logger
 from src.features.content_features_Ridge import RidgeContentModel
 
@@ -39,6 +40,9 @@ class HybridRecommender:
         self.cf_model = None
         self.content_model = None  # RidgeContentModel
         self.popularity = None
+        self.diversity_model: Optional[DiversityRecommender] = None
+        self.books_df: Optional[pd.DataFrame] = None
+        self._diversity_rating_map: Dict[int, float] = {}
         
         # Online learning components
         if self.online_learning:
@@ -54,6 +58,9 @@ class HybridRecommender:
         """Train both CF and Content models"""
         logger.info("Training hybrid recommender with Ridge regression...")
         
+        self.books_df = self._prepare_books_for_diversity(books_df)
+        self._diversity_rating_map = self._compute_diversity_rating_map(interactions_df)
+
         # 1. Content-Based Model (Ridge only)
         logger.info("Building Ridge content-based model...")
         self.content_model = RidgeContentModel(alpha=self.ridge_alpha)
@@ -67,6 +74,7 @@ class HybridRecommender:
         
         # 3. Popularity scores
         self._compute_popularity(interactions_df)
+        self._build_diversity_model()
         logger.info("Hybrid model trained successfully")
     
     def _compute_popularity(self, interactions_df: pd.DataFrame):
@@ -269,6 +277,33 @@ class HybridRecommender:
         # Ridge model uses get_user_weights()
         return self.content_model.get_user_weights(user_id, top_n)
     
+    def diversity_recommendations(
+        self,
+        book_id: int,
+        limit: int = 5,
+    ) -> Dict[str, List[Dict]]:
+        """Return diverse recommendations for the provided book."""
+        if not self.diversity_model:
+            raise RuntimeError("Diversity model not initialized")
+
+        results = self.diversity_model.recommend(
+            book_id=book_id,
+            limit=limit,
+        )
+
+        return {
+            'book_id': int(book_id),
+            'items': [
+                {
+                    'book_id': int(item.book_id),
+                    'rating': float(item.rating),
+                    'score': float(item.score),
+                    'metadata': {k: float(v) for k, v in item.metadata.items()} if item.metadata else {},
+                }
+                for item in results
+            ],
+        }
+    
     def save(self, artifacts_dir: Path):
         """Save all models"""
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -279,13 +314,17 @@ class HybridRecommender:
         if self.content_model:
             self.content_model.save(artifacts_dir / 'content_model.pkl')
         
+        if self.books_df is not None:
+            self.books_df.to_pickle(artifacts_dir / 'books.pkl')
+        
         # Save hybrid metadata
         import pickle
         with open(artifacts_dir / 'hybrid_metadata.pkl', 'wb') as f:
             pickle.dump({
                 'alpha': self.alpha,
                 'popularity': self.popularity,
-                'ridge_alpha': self.ridge_alpha
+                'ridge_alpha': self.ridge_alpha,
+                'diversity_rating_map': self._diversity_rating_map
             }, f)
         
         logger.info(f"Saved hybrid model to {artifacts_dir}")
@@ -293,6 +332,7 @@ class HybridRecommender:
     @classmethod
     def load(cls, artifacts_dir: Path, alpha: float = None):
         """Load saved models"""
+        metadata = {}
         # Load metadata
         metadata_path = artifacts_dir / 'hybrid_metadata.pkl'
         if metadata_path.exists():
@@ -321,7 +361,15 @@ class HybridRecommender:
             model.content_model = RidgeContentModel.load(content_path)
             logger.info("Loaded Ridge content model")
         
+        books_path = artifacts_dir / 'books.pkl'
+        if books_path.exists():
+            model.books_df = pd.read_pickle(books_path)
+        else:
+            logger.warning("Books metadata not found in artifacts; diversity recommendations disabled until retrain.")
+
         model.popularity = popularity
+        model._diversity_rating_map = metadata.get('diversity_rating_map', {})
+        model._build_diversity_model()
         
         logger.info(f"Loaded hybrid model (alpha={model.alpha})")
         
@@ -400,6 +448,7 @@ class HybridRecommender:
         
         # 2. Update Popularity
         self._update_popularity(buffer_df)
+        self._update_diversity_feedback(buffer_df)
         
         # 3. Update CF model (more complex, requires ALS re-fitting)
         # For now, we'll collect these for next full retrain
@@ -471,6 +520,118 @@ class HybridRecommender:
         self.popularity = self.popularity.sort_values(ascending=False)
         
         logger.info(f"Popularity updated for {len(new_counts)} books")
+    
+    def _build_diversity_model(self):
+        """Initialize diversity recommender when supporting data is available."""
+        if self.books_df is None or self.books_df.empty:
+            logger.warning("Cannot initialize diversity model without books metadata")
+            self.diversity_model = None
+            return
+
+        tag_candidates = [
+            column
+            for column in (
+                "genres_text",
+                "tags",
+                "tag_name",
+                "categories",
+                "category",
+                "authors",
+                "title",
+                "description",
+                "summary",
+            )
+            if column in self.books_df.columns
+        ]
+
+        try:
+            self.diversity_model = DiversityRecommender(
+                books_df=self.books_df,
+                interactions_df=None,
+                tag_columns=tag_candidates or None,
+            )
+            if self._diversity_rating_map:
+                self.diversity_model.rating_map = {
+                    int(book_id): float(rating)
+                    for book_id, rating in self._diversity_rating_map.items()
+                }
+                ratings = list(self.diversity_model.rating_map.values())
+                self.diversity_model.global_rating = (
+                    float(np.nanmean(ratings)) if ratings else 0.0
+                )
+        except Exception as exc:
+            logger.error(f"Failed to initialize diversity model: {exc}")
+            self.diversity_model = None
+
+    def _prepare_books_for_diversity(self, books_df: pd.DataFrame) -> pd.DataFrame:
+        """Select relevant columns for diversity recommendations."""
+        if books_df is None or books_df.empty:
+            return pd.DataFrame()
+
+        baseline_columns = ["book_id"]
+        candidate_columns = [
+            "genres_text",
+            "tags",
+            "tag_name",
+            "categories",
+            "category",
+            "authors",
+            "title",
+            "description",
+            "summary",
+        ]
+
+        columns = baseline_columns + [col for col in candidate_columns if col in books_df.columns]
+        return books_df[columns].copy()
+
+    def _compute_diversity_rating_map(self, interactions_df: pd.DataFrame) -> Dict[int, float]:
+        """Compute average rating per book for diversity ranking."""
+        if interactions_df is None or interactions_df.empty:
+            return {}
+
+        rating_column = None
+        for candidate in ("rating_value", "rating", "strength"):
+            if candidate in interactions_df.columns:
+                rating_column = candidate
+                break
+
+        if rating_column is None:
+            return {}
+
+        ratings_df = interactions_df.dropna(subset=["book_id", rating_column])
+        grouped = ratings_df.groupby("book_id")[rating_column].mean()
+        return {int(book_id): float(value) for book_id, value in grouped.items()}
+
+    def _update_diversity_feedback(self, new_interactions_df: pd.DataFrame) -> None:
+        """Update diversity rating statistics with incremental feedback."""
+        if new_interactions_df is None or new_interactions_df.empty:
+            return
+
+        rating_column = None
+        for candidate in ("rating_value", "rating", "strength"):
+            if candidate in new_interactions_df.columns:
+                rating_column = candidate
+                break
+
+        if rating_column is None:
+            return
+
+        aggregated = (
+            new_interactions_df.dropna(subset=["book_id", rating_column])
+            .groupby("book_id")[rating_column]
+            .mean()
+        )
+
+        for book_id, value in aggregated.items():
+            self._diversity_rating_map[int(book_id)] = float(value)
+            if self.diversity_model:
+                self.diversity_model.rating_map[int(book_id)] = float(value)
+
+        if self.diversity_model:
+            ratings = list(self.diversity_model.rating_map.values())
+            self.diversity_model.global_rating = (
+                float(np.nanmean(ratings)) if ratings else 0.0
+            )
     
     def get_buffer_status(self) -> Dict:
         """Get online learning buffer status"""

@@ -10,9 +10,11 @@ from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 import pandas as pd
 import pickle
+import numpy as np
 
 from src.models.neural_cf import NeuralCFModel
 from src.features.sbert_features import SBERTContentModel
+from src.models.diversity import DiversityRecommender
 from src.utils.logging_config import logger
 
 
@@ -66,11 +68,17 @@ class HybridNeuralRecommender:
         )
         
         self.popularity = None
+        self.diversity_model: Optional[DiversityRecommender] = None
+        self.books_df: Optional[pd.DataFrame] = None
+        self._diversity_rating_map: Dict[int, float] = {}
     
     def train(self, books_df: pd.DataFrame, interactions_df: pd.DataFrame):
         """Train both NCF and SBERT models"""
         logger.info("Training Hybrid Neural Recommender...")
         
+        self.books_df = self._prepare_books_for_diversity(books_df)
+        self._diversity_rating_map = self._compute_diversity_rating_map(interactions_df)
+
         # 1. SBERT Content Model
         logger.info("Building SBERT content features...")
         self.content_model.fit(books_df, batch_size=32)
@@ -82,6 +90,7 @@ class HybridNeuralRecommender:
         
         # 3. Popularity
         self._compute_popularity(interactions_df)
+        self._build_diversity_model()
         
         logger.info("Hybrid Neural model trained")
     
@@ -267,6 +276,33 @@ class HybridNeuralRecommender:
         """Get user's profile keywords (top interacted books for SBERT)"""
         return self.content_model.get_profile_keywords(user_id, top_n)
     
+    def diversity_recommendations(
+        self,
+        book_id: int,
+        limit: int = 5,
+    ) -> Dict[str, List[Dict]]:
+        """Return diverse recommendations for the provided book."""
+        if not self.diversity_model:
+            raise RuntimeError("Diversity model not initialized")
+
+        results = self.diversity_model.recommend(
+            book_id=book_id,
+            limit=limit,
+        )
+
+        return {
+            'book_id': int(book_id),
+            'items': [
+                {
+                    'book_id': int(item.book_id),
+                    'rating': float(item.rating),
+                    'score': float(item.score),
+                    'metadata': {k: float(v) for k, v in item.metadata.items()} if item.metadata else {},
+                }
+                for item in results
+            ],
+        }
+    
     def save(self, artifacts_dir: Path):
         """Save all models"""
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -281,14 +317,19 @@ class HybridNeuralRecommender:
         with open(artifacts_dir / 'hybrid_neural_metadata.pkl', 'wb') as f:
             pickle.dump({
                 'alpha': self.alpha,
-                'popularity': self.popularity
+                'popularity': self.popularity,
+                'diversity_rating_map': self._diversity_rating_map
             }, f)
+        
+        if self.books_df is not None:
+            self.books_df.to_pickle(artifacts_dir / 'books.pkl')
         
         logger.info(f"Saved Hybrid Neural model to {artifacts_dir}")
     
     @classmethod
     def load(cls, artifacts_dir: Path, alpha: float = None, device: str = None):
         """Load saved models"""
+        metadata = {}
         # Load metadata
         metadata_path = artifacts_dir / 'hybrid_neural_metadata.pkl'
         if metadata_path.exists():
@@ -313,6 +354,127 @@ class HybridNeuralRecommender:
             model.content_model = SBERTContentModel.load(sbert_path, device=device)
         
         model.popularity = popularity
+        model._diversity_rating_map = metadata.get('diversity_rating_map', {})
+
+        books_path = artifacts_dir / 'books.pkl'
+        if books_path.exists():
+            model.books_df = pd.read_pickle(books_path)
+        else:
+            logger.warning("Books metadata not found in artifacts; diversity recommendations disabled until retrain.")
+
+        model._build_diversity_model()
         
         logger.info(f"Loaded Hybrid Neural model (alpha={model.alpha})")
         return model
+
+    def _build_diversity_model(self):
+        """Initialize diversity recommender leveraging SBERT embeddings."""
+        if self.books_df is None or self.books_df.empty:
+            logger.warning("Cannot initialize diversity model without books metadata")
+            self.diversity_model = None
+            return
+
+        embeddings = None
+        if (
+            self.content_model
+            and getattr(self.content_model, "embeddings", None) is not None
+            and getattr(self.content_model, "book_ids", None) is not None
+        ):
+            try:
+                id_to_idx = {int(bid): idx for idx, bid in enumerate(self.content_model.book_ids)}
+                vectors = []
+                missing = []
+                for bid in self.books_df["book_id"]:
+                    idx = id_to_idx.get(int(bid))
+                    if idx is None:
+                        missing.append(int(bid))
+                        continue
+                    vectors.append(self.content_model.embeddings[idx])
+
+                if missing:
+                    logger.warning(
+                        "Diversity embeddings missing for %d books; falling back to TF-IDF for those entries.",
+                        len(missing),
+                    )
+
+                if vectors and len(vectors) == len(self.books_df):
+                    embeddings = np.vstack(vectors).astype(np.float32)
+                else:
+                    embeddings = None
+            except Exception as exc:
+                logger.warning(f"Failed to prepare SBERT embeddings for diversity: {exc}")
+
+        tag_candidates = [
+            column
+            for column in (
+                "genres_text",
+                "tags",
+                "tag_name",
+                "categories",
+                "category",
+                "authors",
+                "title",
+                "description",
+                "summary",
+            )
+            if column in self.books_df.columns
+        ]
+
+        try:
+            self.diversity_model = DiversityRecommender(
+                books_df=self.books_df,
+                interactions_df=None,
+                tag_columns=tag_candidates or None,
+                embeddings=embeddings,
+            )
+            if self._diversity_rating_map:
+                self.diversity_model.rating_map = {
+                    int(book_id): float(rating)
+                    for book_id, rating in self._diversity_rating_map.items()
+                }
+                ratings = list(self.diversity_model.rating_map.values())
+                self.diversity_model.global_rating = (
+                    float(np.nanmean(ratings)) if ratings else 0.0
+                )
+        except Exception as exc:
+            logger.error(f"Failed to initialize diversity model: {exc}")
+            self.diversity_model = None
+
+    def _prepare_books_for_diversity(self, books_df: pd.DataFrame) -> pd.DataFrame:
+        """Select relevant columns for diversity recommendations."""
+        if books_df is None or books_df.empty:
+            return pd.DataFrame()
+
+        baseline_columns = ["book_id"]
+        candidate_columns = [
+            "genres_text",
+            "tags",
+            "tag_name",
+            "categories",
+            "category",
+            "authors",
+            "title",
+            "description",
+            "summary",
+        ]
+
+        columns = baseline_columns + [col for col in candidate_columns if col in books_df.columns]
+        return books_df[columns].copy()
+
+    def _compute_diversity_rating_map(self, interactions_df: pd.DataFrame) -> Dict[int, float]:
+        """Compute average rating per book for diversity ranking."""
+        if interactions_df is None or interactions_df.empty:
+            return {}
+
+        rating_column = None
+        for candidate in ("rating_value", "rating", "strength"):
+            if candidate in interactions_df.columns:
+                rating_column = candidate
+                break
+
+        if rating_column is None:
+            return {}
+
+        ratings_df = interactions_df.dropna(subset=["book_id", rating_column])
+        grouped = ratings_df.groupby("book_id")[rating_column].mean()
+        return {int(book_id): float(value) for book_id, value in grouped.items()}
