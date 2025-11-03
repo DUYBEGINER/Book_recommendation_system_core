@@ -25,7 +25,7 @@ def main():
     parser.add_argument('--schema', type=str, default='book_recommendation_system')
     
     # Model args
-    parser.add_argument('--alpha', type=float, default=0.6,
+    parser.add_argument('--alpha', type=float, default=0.4,
                        help='ALS weight (0-1), SBERT weight = 1-alpha')
     parser.add_argument('--als-factors', type=int, default=64,
                        help='ALS latent factors')

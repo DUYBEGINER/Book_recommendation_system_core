@@ -33,8 +33,8 @@ class DiversityResponse(BaseModel):
 class FeedbackRequest(BaseModel):
     user_id: int
     book_id: int
-    event: str = Field(..., pattern="^(view|favorite|rate)$")
-    rating_value: Optional[int] = Field(None, ge=1, le=5)
+    event: str = Field(..., pattern="^(rating|favorite|history)$")
+    rating_value: Optional[int] = Field(None, ge=0, le=5, description="Rating: 1-5 for 'rating', 0 to remove 'favorite'")
 
 class HealthResponse(BaseModel):
     status: str

@@ -93,29 +93,52 @@ class SBERTContentModel:
         
         profile_u = Σ(strength_i × embedding_i) / Σ(strength_i)
         
+        Stores interactions with type breakdown for online learning:
+        user_interactions[user_id][book_id] = {
+            'total': sum of all strengths,
+            'details': {'rating': X, 'history': Y, 'favorite': Z}
+        }
+        
         Args:
-            interactions_df: DataFrame with [user_id, book_id, strength]
+            interactions_df: DataFrame with [user_id, book_id, strength, type]
         """
         logger.info("Building user profiles from interactions...")
         
-        # Store interactions
+        # Store interactions with type breakdown
         for _, row in interactions_df.iterrows():
             user_id = row['user_id']
             book_id = row['book_id']
             strength = row.get('strength', 1.0)
+            interaction_type = row.get('type', 'unknown')
             
             if user_id not in self.user_interactions:
                 self.user_interactions[user_id] = {}
             
-            # Aggregate (sum) strengths for same book
-            if book_id in self.user_interactions[user_id]:
-                self.user_interactions[user_id][book_id] += strength
+            if book_id not in self.user_interactions[user_id]:
+                self.user_interactions[user_id][book_id] = {
+                    'total': 0.0,
+                    'details': {}
+                }
+            
+            # Update type-specific strength (sum for same type, e.g., multiple ratings)
+            if interaction_type in self.user_interactions[user_id][book_id]['details']:
+                self.user_interactions[user_id][book_id]['details'][interaction_type] += strength
             else:
-                self.user_interactions[user_id][book_id] = strength
+                self.user_interactions[user_id][book_id]['details'][interaction_type] = strength
+            
+            # Update total
+            self.user_interactions[user_id][book_id]['total'] = sum(
+                self.user_interactions[user_id][book_id]['details'].values()
+            )
         
-        # Build profiles
+        # Build profiles (extract total strengths)
         for user_id, books_dict in self.user_interactions.items():
-            profile = self._compute_user_profile(books_dict)
+            # Convert to {book_id: total_strength} for profile computation
+            books_strengths = {
+                book_id: data['total'] 
+                for book_id, data in books_dict.items()
+            }
+            profile = self._compute_user_profile(books_strengths)
             if profile is not None:
                 self.user_profiles[user_id] = profile
         
@@ -250,33 +273,64 @@ class SBERTContentModel:
         
         books_dict = self.user_interactions[user_id]
         
-        # Sort by strength
-        sorted_books = sorted(books_dict.items(), 
-                            key=lambda x: x[1], reverse=True)[:top_n]
+        # Extract total strengths and sort
+        books_strengths = [(book_id, data['total']) for book_id, data in books_dict.items()]
+        sorted_books = sorted(books_strengths, key=lambda x: x[1], reverse=True)[:top_n]
         
         # Format as (book_id_str, strength)
         return [(f"book_{book_id}", float(strength)) 
                 for book_id, strength in sorted_books]
     
-    def update_user_profile(self, user_id: int, book_id: int, strength: float = 1.0):
+    def update_user_profile(self, user_id: int, book_id: int, strength: float = 1.0, 
+                           interaction_type: str = 'unknown'):
         """
         Update user profile with new interaction
+        
+        Properly handles interaction type updates:
+        - New interaction: Add to details
+        - Existing interaction of same type: REPLACE (not add)
+        - Different type: Add new type
         
         Args:
             user_id: User ID
             book_id: Book ID
             strength: Interaction strength
+            interaction_type: Type of interaction ('rating', 'favorite', 'history', etc.)
         """
         if user_id not in self.user_interactions:
             self.user_interactions[user_id] = {}
         
-        if book_id in self.user_interactions[user_id]:
-            self.user_interactions[user_id][book_id] += strength
+        if book_id not in self.user_interactions[user_id]:
+            # New book interaction
+            self.user_interactions[user_id][book_id] = {
+                'total': strength,
+                'details': {interaction_type: strength}
+            }
+            logger.debug(f"New interaction: user={user_id}, book={book_id}, "
+                        f"type={interaction_type}, strength={strength}")
         else:
-            self.user_interactions[user_id][book_id] = strength
+            # Existing book - update specific interaction type
+            old_details = self.user_interactions[user_id][book_id]['details'].copy()
+            
+            # Replace (not add) the interaction type strength
+            self.user_interactions[user_id][book_id]['details'][interaction_type] = strength
+            
+            # Recalculate total
+            self.user_interactions[user_id][book_id]['total'] = sum(
+                self.user_interactions[user_id][book_id]['details'].values()
+            )
+            
+            logger.debug(f"Updated interaction: user={user_id}, book={book_id}, "
+                        f"type={interaction_type}, strength={strength}, "
+                        f"old_details={old_details}, "
+                        f"new_total={self.user_interactions[user_id][book_id]['total']}")
         
-        # Recompute profile
-        profile = self._compute_user_profile(self.user_interactions[user_id])
+        # Recompute profile (extract total strengths)
+        books_strengths = {
+            bid: data['total'] 
+            for bid, data in self.user_interactions[user_id].items()
+        }
+        profile = self._compute_user_profile(books_strengths)
         if profile is not None:
             self.user_profiles[user_id] = profile
             logger.debug(f"Updated profile for user {user_id}")

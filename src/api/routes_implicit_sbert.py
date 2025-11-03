@@ -28,12 +28,12 @@ async def health_check():
     try:
         rec = get_recommender()
         return HealthResponse(
-            status="healthy",
+            status="ok",
             models_loaded=True
         )
     except:
         return HealthResponse(
-            status="unhealthy",
+            status="error",
             models_loaded=False
         )
 
@@ -95,42 +95,101 @@ async def get_similar(book_id: int, limit: int = 10):
         logger.error(f"Error getting similar books: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/diversity", response_model=DiversityResponse)
+async def get_diversity(book_id: int, limit: int = 5):
+    """Get diverse book recommendations for a reference book"""
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100"
+        )
+
+    rec = get_recommender()
+
+    if rec.diversity_model is None:
+        raise HTTPException(status_code=503, detail="Diversity model not loaded")
+
+    try:
+        result = rec.diversity_recommendations(
+            book_id=book_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Failed to compute diversity recommendations: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to compute diversity recommendations")
+
+    return DiversityResponse(**result)
+
 @router.post("/feedback")
 async def record_feedback(request: FeedbackRequest):
     """
-    Record user feedback (for future batch retraining)
+   Record user feedback and trigger online learning
     
-    Event types and their strengths (consistent with training data):
-    - view: 1.0 (implicit view signal)
-    - favorite: 5.0 (strong positive signal)
-    - rate: rating_value (1-5 explicit rating)
+    Event types and their strengths:
+    - rating: rating_value (1-5, explicit rating from user)
+    - history: 1.0 (implicit signal: user read/opened the book)
+    - favorite: 5.0 if rating_value is None or > 0, 0.0 if rating_value = 0 (remove favorite)
     
-    Note: This model doesn't support online learning.
-    Feedback is logged for future batch retraining.
+    Examples:
+    - Add favorite: {"event": "favorite"} → strength = 5.0
+    - Remove favorite: {"event": "favorite", "rating_value": 0} → strength = 0.0
+    
+    Note: Online learning only updates SBERT user profiles.
+    ALS model requires full retrain.
     """
     rec = get_recommender()
     
-    # Map event to strength (MUST match db_loader.py!)
-    strength_map = {
-        'view': 1.0,
-        'favorite': 5.0,  # Matches training data
-        'rate': request.rating_value if request.rating_value else 3.0
-    }
+    # Map event to strength
+    if request.event == 'rating':
+        if not request.rating_value or request.rating_value < 1:
+            raise HTTPException(
+                status_code=400, 
+                detail="rating_value (1-5) is required for 'rating' event"
+            )
+        strength = float(request.rating_value)
+    elif request.event == 'favorite':
+        # Support unfavorite by passing rating_value=0
+        if request.rating_value == 0:
+            strength = 0.0  # Remove favorite
+        else:
+            strength = 5.0  # Add favorite
+    elif request.event == 'history':
+        strength = 1.0  # Simple implicit signal: user read the book
+    else:
+        strength = 1.0
     
-    strength = strength_map.get(request.event, 1.0)
-    
-    # Log feedback (for future retraining)
-    logger.info(f"📝 Feedback logged: user={request.user_id}, book={request.book_id}, "
+    logger.info(f"Feedback: user={request.user_id}, book={request.book_id}, "
                f"event={request.event}, strength={strength}")
     
-    return {
-        "status": "recorded",
-        "user_id": request.user_id,
-        "book_id": request.book_id,
-        "event": request.event,
-        "strength": strength,
-        "message": "Feedback logged for future batch retraining"
-    }
+    # Add to online learning buffer (if enabled)
+    if rec.online_learning:
+        buffer_triggered = rec.add_interaction(
+            user_id=request.user_id,
+            book_id=request.book_id,
+            strength=strength,
+            interaction_type=request.event
+        )
+        
+        buffer_status = rec.get_buffer_status()
+        
+        return {
+            "status": "recorded",
+            "online_learning": True,
+            "buffer_triggered_update": buffer_triggered,
+            "buffer_status": buffer_status,
+            "note": "Only SBERT profiles updated. ALS requires full retrain."
+        }
+    else:
+        # Fallback: just log (online learning disabled)
+        return {
+            "status": "recorded",
+            "online_learning": False,
+            "message": "Feedback logged for future batch retraining"
+        }
 
 @router.get("/model/info")
 async def get_model_info():
@@ -140,7 +199,7 @@ async def get_model_info():
     info = {
         "status": "loaded",
         "alpha": rec.alpha,
-        "online_learning": {"enabled": False},  # This model doesn't support online learning
+        "online_learning": rec.get_buffer_status() if rec.online_learning else {"enabled": False},
         "cf_model": {
             "num_users": len(rec.als_model.user_id_map) if rec.als_model and rec.als_model.user_id_map else 0,
             "num_items": len(rec.als_model.item_id_map) if rec.als_model and rec.als_model.item_id_map else 0,
@@ -162,6 +221,69 @@ async def get_model_info():
     
     return info
 
+@router.post("/online-learning/update")
+async def trigger_incremental_update(force: bool = False):
+    """
+    Trigger incremental model update with buffered interactions
+    
+    Note: Only SBERT user profiles will be updated. ALS requires full retrain.
+    
+    Args:
+        force: Force update even if buffer is not full
+    """
+    rec = get_recommender()
+    
+    if not rec.online_learning:
+        raise HTTPException(
+            status_code=400,
+            detail="Online learning is disabled. Enable it first with POST /online-learning/enable"
+        )
+    
+    buffer_status_before = rec.get_buffer_status()
+    
+    rec.incremental_update(force=force)
+    
+    buffer_status_after = rec.get_buffer_status()
+    
+    return {
+        "status": "updated",
+        "before": buffer_status_before,
+        "after": buffer_status_after,
+        "note": "Only SBERT profiles updated. ALS requires full retrain."
+    }
+
+@router.post("/online-learning/enable")
+async def enable_online_learning(buffer_size: int = 100):
+    """Enable online learning (SBERT only)"""
+    if buffer_size < 10 or buffer_size > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="buffer_size must be between 10 and 1000"
+        )
+    
+    rec = get_recommender()
+    rec.enable_online_learning(buffer_size=buffer_size)
+    
+    return {
+        "status": "enabled",
+        "buffer_size": buffer_size,
+        "note": "Only SBERT profiles will be updated incrementally. ALS requires full retrain."
+    }
+
+@router.post("/online-learning/disable")
+async def disable_online_learning():
+    """Disable online learning"""
+    rec = get_recommender()
+    rec.disable_online_learning()
+    
+    return {"status": "disabled"}
+
+@router.get("/online-learning/status")
+async def get_online_learning_status():
+    """Get online learning buffer status"""
+    rec = get_recommender()
+    return rec.get_buffer_status()
+
 @router.post("/retrain")
 async def trigger_retrain(background_tasks: BackgroundTasks):
     """
@@ -177,7 +299,7 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     background_tasks.add_task(retrain_models)
     
     return {
-        "status": "retraining_started",
+        "status": "retraining",
         "message": "Models are being retrained in background. Check /model/info for status."
     }
 

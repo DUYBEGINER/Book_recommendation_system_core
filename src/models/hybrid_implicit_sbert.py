@@ -14,6 +14,7 @@ import pickle
 
 from src.models.collaborative import CollaborativeModel
 from src.features.sbert_features import SBERTContentModel
+from src.models.diversity import DiversityRecommender
 from src.utils.logging_config import logger
 
 
@@ -28,7 +29,7 @@ class HybridImplicitSBERTRecommender:
     4. Fallback: Popularity-based for cold start
     """
     
-    def __init__(self, alpha: float = 0.6,
+    def __init__(self, alpha: float = 0.4,
                  # ALS params
                  als_factors: int = 64, als_iterations: int = 30, 
                  als_regularization: float = 0.01,
@@ -58,9 +59,19 @@ class HybridImplicitSBERTRecommender:
         # Models
         self.als_model: Optional[CollaborativeModel] = None
         self.content_model: Optional[SBERTContentModel] = None
+        self.diversity_model: Optional[DiversityRecommender] = None
         
         # Popularity fallback
         self.popularity: Optional[Dict[int, int]] = None
+        
+        # Diversity support
+        self.books_df: Optional[pd.DataFrame] = None
+        self._diversity_rating_map: Dict[int, float] = {}
+        
+        # Online learning support (incremental updates for SBERT only)
+        self.online_learning = False
+        self.interaction_buffer = []
+        self.buffer_size = 100
     
     def train(self, books_df: pd.DataFrame, interactions_df: pd.DataFrame):
         """
@@ -73,6 +84,10 @@ class HybridImplicitSBERTRecommender:
         logger.info("="*70)
         logger.info("Training Hybrid Implicit ALS + SBERT Recommender")
         logger.info("="*70)
+        
+        # Prepare data for diversity model
+        self.books_df = self._prepare_books_for_diversity(books_df)
+        self._diversity_rating_map = self._compute_diversity_rating_map(interactions_df)
         
         # 1. Train Implicit ALS
         logger.info("\n1️⃣ Training Implicit ALS model...")
@@ -99,6 +114,11 @@ class HybridImplicitSBERTRecommender:
         self._compute_popularity(interactions_df)
         logger.info("✅ Popularity scores computed")
         
+        # 4. Build diversity model
+        logger.info("\n4️⃣ Building diversity model...")
+        self._build_diversity_model()
+        logger.info("✅ Diversity model built")
+        
         logger.info("\n" + "="*70)
         logger.info("✅ Hybrid Implicit ALS + SBERT training completed!")
         logger.info("="*70)
@@ -108,6 +128,45 @@ class HybridImplicitSBERTRecommender:
         pop_counts = interactions_df['book_id'].value_counts().to_dict()
         self.popularity = dict(sorted(pop_counts.items(), 
                                      key=lambda x: x[1], reverse=True))
+    
+    def _prepare_books_for_diversity(self, books_df: pd.DataFrame) -> pd.DataFrame:
+        """Select relevant columns for diversity recommendations"""
+        if books_df is None or books_df.empty:
+            return pd.DataFrame()
+        
+        baseline_columns = ["book_id"]
+        candidate_columns = [
+            "genres_text",
+            "tags",
+            "tag_name",
+            "categories",
+            "category",
+            "authors",
+            "title",
+            "description",
+            "summary",
+        ]
+        
+        columns = baseline_columns + [col for col in candidate_columns if col in books_df.columns]
+        return books_df[columns].copy()
+    
+    def _compute_diversity_rating_map(self, interactions_df: pd.DataFrame) -> Dict[int, float]:
+        """Compute average rating per book for diversity ranking"""
+        if interactions_df is None or interactions_df.empty:
+            return {}
+        
+        rating_column = None
+        for candidate in ("rating_value", "rating", "strength"):
+            if candidate in interactions_df.columns:
+                rating_column = candidate
+                break
+        
+        if rating_column is None:
+            return {}
+        
+        ratings_df = interactions_df.dropna(subset=["book_id", rating_column])
+        grouped = ratings_df.groupby("book_id")[rating_column].mean()
+        return {int(book_id): float(value) for book_id, value in grouped.items()}
     
     def recommend(self, user_id: int, limit: int = 10) -> List[Dict]:
         """
@@ -283,6 +342,234 @@ class HybridImplicitSBERTRecommender:
             return []
         return self.content_model.get_profile_keywords(user_id, top_n)
     
+    def diversity_recommendations(
+        self,
+        book_id: int,
+        limit: int = 5,
+    ) -> Dict[str, List[Dict]]:
+        """
+        Get diverse recommendations for a book
+        
+        Args:
+            book_id: Reference book ID
+            limit: Number of recommendations per category
+            
+        Returns:
+            Dict with diversity categories and recommendations
+        """
+        if self.diversity_model is None:
+            raise RuntimeError("Diversity model not initialized")
+        
+        results = self.diversity_model.recommend(
+            book_id=book_id,
+            limit=limit,
+        )
+        
+        return {
+            'book_id': int(book_id),
+            'items': [
+                {
+                    'book_id': int(item.book_id),
+                    'rating': float(item.rating),
+                    'score': float(item.score),
+                    'metadata': {k: float(v) for k, v in item.metadata.items()} if item.metadata else {},
+                }
+                for item in results
+            ],
+        }
+    
+    def _build_diversity_model(self):
+        """Build diversity recommender using SBERT embeddings"""
+        if self.books_df is None or self.books_df.empty:
+            logger.warning("Cannot build diversity model: books_df not available")
+            self.diversity_model = None
+            return
+        
+        # Prepare SBERT embeddings for diversity model
+        embeddings = None
+        if (
+            self.content_model
+            and getattr(self.content_model, "embeddings", None) is not None
+            and getattr(self.content_model, "book_ids", None) is not None
+        ):
+            try:
+                id_to_idx = {int(bid): idx for idx, bid in enumerate(self.content_model.book_ids)}
+                vectors = []
+                missing = []
+                for bid in self.books_df["book_id"]:
+                    idx = id_to_idx.get(int(bid))
+                    if idx is None:
+                        missing.append(int(bid))
+                        continue
+                    vectors.append(self.content_model.embeddings[idx])
+
+                if missing:
+                    logger.warning(
+                        "Diversity embeddings missing for %d books; falling back to TF-IDF for those entries.",
+                        len(missing),
+                    )
+
+                if vectors and len(vectors) == len(self.books_df):
+                    embeddings = np.vstack(vectors).astype(np.float32)
+                else:
+                    embeddings = None
+            except Exception as exc:
+                logger.warning(f"Failed to prepare SBERT embeddings for diversity: {exc}")
+        
+        # Determine tag columns for diversity
+        tag_candidates = [
+            column
+            for column in (
+                "genres_text",
+                "tags",
+                "tag_name",
+                "categories",
+                "category",
+                "authors",
+                "title",
+                "description",
+                "summary",
+            )
+            if column in self.books_df.columns
+        ]
+        
+        try:
+            self.diversity_model = DiversityRecommender(
+                books_df=self.books_df,
+                interactions_df=None,
+                tag_columns=tag_candidates or None,
+                embeddings=embeddings,
+            )
+            
+            # Set rating map for diversity ranking
+            if self._diversity_rating_map:
+                self.diversity_model.rating_map = {
+                    int(book_id): float(rating)
+                    for book_id, rating in self._diversity_rating_map.items()
+                }
+                ratings = list(self.diversity_model.rating_map.values())
+                self.diversity_model.global_rating = (
+                    float(np.nanmean(ratings)) if ratings else 0.0
+                )
+            
+            logger.info(f"Built diversity model with {len(self.books_df)} books")
+        except Exception as e:
+            logger.error(f"Failed to build diversity model: {e}")
+            self.diversity_model = None
+    
+    # ==================== Online Learning Methods ====================
+    
+    def enable_online_learning(self, buffer_size: int = 100):
+        """Enable online learning for SBERT model only"""
+        self.online_learning = True
+        self.buffer_size = buffer_size
+        self.interaction_buffer = []
+        logger.info(f"Online learning enabled (buffer_size={buffer_size})")
+        logger.info("Note: Only SBERT profiles will be updated incrementally. ALS requires full retrain.")
+    
+    def disable_online_learning(self):
+        """Disable online learning"""
+        self.online_learning = False
+        self.interaction_buffer = []
+        logger.info("Online learning disabled")
+    
+    def add_interaction(self, user_id: int, book_id: int, strength: float = 1.0, 
+                       interaction_type: str = 'view') -> bool:
+        """
+        Add new interaction to buffer for online learning
+        
+        Args:
+            user_id: User ID
+            book_id: Book ID
+            strength: Interaction strength
+            interaction_type: Type of interaction
+            
+        Returns:
+            True if buffer triggered update, False otherwise
+        """
+        if not self.online_learning:
+            logger.warning("Online learning is disabled. Enable it first.")
+            return False
+        
+        # Add to buffer
+        self.interaction_buffer.append({
+            'user_id': user_id,
+            'book_id': book_id,
+            'strength': strength,
+            'type': interaction_type
+        })
+        
+        logger.debug(f"Added interaction to buffer: user={user_id}, book={book_id}, "
+                    f"strength={strength}, buffer_size={len(self.interaction_buffer)}/{self.buffer_size}")
+        
+        # Trigger update if buffer is full
+        if len(self.interaction_buffer) >= self.buffer_size:
+            logger.info(f"Buffer full ({len(self.interaction_buffer)}/{self.buffer_size}), triggering incremental update...")
+            self.incremental_update(force=True)
+            return True
+        
+        return False
+    
+    def incremental_update(self, force: bool = False):
+        """
+        Incrementally update SBERT user profiles with buffered interactions
+        
+        Note: ALS model is NOT updated (requires full retrain)
+        
+        Args:
+            force: Force update even if buffer is not full
+        """
+        if not self.online_learning:
+            logger.warning("Online learning is disabled")
+            return
+        
+        if len(self.interaction_buffer) == 0:
+            logger.info("Buffer is empty, nothing to update")
+            return
+        
+        if not force and len(self.interaction_buffer) < self.buffer_size:
+            logger.info(f"Buffer not full ({len(self.interaction_buffer)}/{self.buffer_size}), "
+                       f"skipping update (use force=True to override)")
+            return
+        
+        logger.info(f"Starting incremental update with {len(self.interaction_buffer)} interactions...")
+        
+        # Update SBERT user profiles only
+        if self.content_model:
+            for interaction in self.interaction_buffer:
+                self.content_model.update_user_profile(
+                    user_id=interaction['user_id'],
+                    book_id=interaction['book_id'],
+                    strength=interaction['strength'],
+                    interaction_type=interaction['type']
+                )
+            logger.info(f"✅ Updated {len(self.interaction_buffer)} SBERT user profiles")
+        
+        # Update popularity
+        for interaction in self.interaction_buffer:
+            book_id = interaction['book_id']
+            if self.popularity and book_id in self.popularity:
+                self.popularity[book_id] += 1
+            elif self.popularity:
+                self.popularity[book_id] = 1
+        
+        # Clear buffer
+        buffer_count = len(self.interaction_buffer)
+        self.interaction_buffer = []
+        
+        logger.info(f"✅ Incremental update completed, cleared {buffer_count} interactions from buffer")
+        logger.info("⚠️  Note: ALS model NOT updated (requires full retrain)")
+    
+    def get_buffer_status(self) -> Dict:
+        """Get online learning buffer status"""
+        return {
+            "enabled": self.online_learning,
+            "buffer_size": len(self.interaction_buffer),
+            "buffer_capacity": self.buffer_size,
+            "buffer_full": len(self.interaction_buffer) >= self.buffer_size if self.online_learning else False,
+            "note": "Only SBERT profiles updated incrementally. ALS requires full retrain."
+        }
+    
     def save(self, artifacts_dir: Path):
         """Save all models"""
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -303,14 +590,22 @@ class HybridImplicitSBERTRecommender:
                 'als_iterations': self.als_iterations,
                 'als_regularization': self.als_regularization,
                 'sbert_model_name': self.sbert_model_name,
-                'popularity': self.popularity
+                'popularity': self.popularity,
+                'online_learning': self.online_learning,
+                'buffer_size': self.buffer_size,
+                'diversity_rating_map': self._diversity_rating_map
             }, f)
+        
+        # Save books_df for diversity model
+        if self.books_df is not None:
+            self.books_df.to_pickle(artifacts_dir / 'books.pkl')
         
         logger.info(f"Saved Hybrid Implicit ALS + SBERT model to {artifacts_dir}")
     
     @classmethod
     def load(cls, artifacts_dir: Path, alpha: float = None, device: str = None):
         """Load saved models"""
+        metadata = {}
         # Load metadata
         metadata_path = artifacts_dir / 'hybrid_implicit_sbert_metadata.pkl'
         if metadata_path.exists():
@@ -350,6 +645,17 @@ class HybridImplicitSBERTRecommender:
             model.content_model = SBERTContentModel.load(sbert_path, device=device)
         
         model.popularity = popularity
+        model._diversity_rating_map = metadata.get('diversity_rating_map', {})
         
-        logger.info(f"Loaded Hybrid Implicit ALS + SBERT model (alpha={model.alpha})")
+        # Load books_df
+        books_path = artifacts_dir / 'books.pkl'
+        if books_path.exists():
+            model.books_df = pd.read_pickle(books_path)
+        else:
+            logger.warning("Books metadata not found in artifacts; diversity recommendations disabled until retrain.")
+        
+        # Build diversity model
+        model._build_diversity_model()
+        
+        logger.info(f"Loaded Hybrid Implicit ALS + SBERT model from {artifacts_dir}")
         return model

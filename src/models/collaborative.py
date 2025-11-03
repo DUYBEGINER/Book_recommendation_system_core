@@ -40,8 +40,7 @@ class CollaborativeModel:
         self.user_id_map = {uid: idx for idx, uid in enumerate(self.user_ids)}
         self.item_id_map = {iid: idx for idx, iid in enumerate(self.item_ids)}
         self.item_id_reverse = {idx: iid for iid, idx in self.item_id_map.items()}
-        # print("itemid to idx", self.item_id_map)
-        # print("user id to idx", self.user_id_map)
+
         # Build sparse matrix (users × items)
         rows = agg['user_id'].map(self.user_id_map).values
         cols = agg['book_id'].map(self.item_id_map).values
@@ -51,19 +50,12 @@ class CollaborativeModel:
             (data, (rows, cols)),
             shape=(len(self.user_ids), len(self.item_ids))
         )
-        # user_idx = self.user_id_map[1]
-        # interacted_item_cols = self.user_item_matrix[user_idx].nonzero()[1]
-        # print("Interacted item columns:", interacted_item_cols)
-        # user_idx2 = self.user_id_map[5]
-        # interacted_item_cols2 = self.user_item_matrix[user_idx2].nonzero()[1]
-        # print("Interacted item columns:", interacted_item_cols2)
-        # print("User-Item Matrix:", self.user_item_matrix)
+
         # Create item-user matrix for training
         self.item_user_matrix = self.user_item_matrix.T.tocsr()
-        # print("Item-User Matrix:", self.item_user_matrix)
+
         # Train with item-user matrix (items × users)
         self.model.fit(self.user_item_matrix)
-        # self.model.fit(self.item_user_matrix)  # items × users ✅
         
         logger.info(f"CF matrix: {self.user_item_matrix.shape}, nnz={self.user_item_matrix.nnz}")
     
