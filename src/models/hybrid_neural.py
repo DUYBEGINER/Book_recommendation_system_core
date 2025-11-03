@@ -71,6 +71,11 @@ class HybridNeuralRecommender:
         self.diversity_model: Optional[DiversityRecommender] = None
         self.books_df: Optional[pd.DataFrame] = None
         self._diversity_rating_map: Dict[int, float] = {}
+        
+        # Online learning (SBERT profiles only)
+        self.online_learning: bool = False
+        self.interaction_buffer: List[Dict] = []
+        self.buffer_size: int = 100
     
     def train(self, books_df: pd.DataFrame, interactions_df: pd.DataFrame):
         """Train both NCF and SBERT models"""
@@ -318,7 +323,9 @@ class HybridNeuralRecommender:
             pickle.dump({
                 'alpha': self.alpha,
                 'popularity': self.popularity,
-                'diversity_rating_map': self._diversity_rating_map
+                'diversity_rating_map': self._diversity_rating_map,
+                'online_learning': self.online_learning,
+                'buffer_size': self.buffer_size,
             }, f)
         
         if self.books_df is not None:
@@ -355,6 +362,9 @@ class HybridNeuralRecommender:
         
         model.popularity = popularity
         model._diversity_rating_map = metadata.get('diversity_rating_map', {})
+        model.online_learning = metadata.get('online_learning', False)
+        model.buffer_size = metadata.get('buffer_size', 100)
+        model.interaction_buffer = []
 
         books_path = artifacts_dir / 'books.pkl'
         if books_path.exists():
@@ -478,3 +488,132 @@ class HybridNeuralRecommender:
         ratings_df = interactions_df.dropna(subset=["book_id", rating_column])
         grouped = ratings_df.groupby("book_id")[rating_column].mean()
         return {int(book_id): float(value) for book_id, value in grouped.items()}
+
+    # ==================== Online Learning (SBERT only) ====================
+
+    def enable_online_learning(self, buffer_size: int = 100):
+        """Enable incremental updates for SBERT user profiles."""
+        self.online_learning = True
+        self.buffer_size = buffer_size
+        self.interaction_buffer = []
+        logger.info(
+            "Online learning enabled for Hybrid Neural recommender "
+            f"(buffer_size={buffer_size}). Only SBERT profiles will update incrementally."
+        )
+        logger.info("NCF model still requires full retrain to refresh collaborative signals.")
+
+    def disable_online_learning(self):
+        """Disable online learning and clear buffered interactions."""
+        self.online_learning = False
+        self.interaction_buffer = []
+        logger.info("Online learning disabled for Hybrid Neural recommender.")
+
+    def add_interaction(
+        self,
+        user_id: int,
+        book_id: int,
+        strength: float = 1.0,
+        interaction_type: str = "history",
+    ) -> bool:
+        """
+        Add a new interaction to the buffer.
+
+        Returns True if buffer capacity reached and an update was triggered.
+        """
+        if not self.online_learning:
+            logger.warning("Attempted to add interaction while online learning disabled.")
+            return False
+
+        self.interaction_buffer.append(
+            {
+                "user_id": user_id,
+                "book_id": book_id,
+                "strength": float(strength),
+                "type": interaction_type,
+            }
+        )
+
+        logger.debug(
+            "Buffered interaction (user=%s, book=%s, strength=%s, type=%s) "
+            "[%d/%d]",
+            user_id,
+            book_id,
+            strength,
+            interaction_type,
+            len(self.interaction_buffer),
+            self.buffer_size,
+        )
+
+        if len(self.interaction_buffer) >= self.buffer_size:
+            logger.info(
+                "Online learning buffer full (%d/%d). Triggering SBERT incremental update.",
+                len(self.interaction_buffer),
+                self.buffer_size,
+            )
+            self.incremental_update(force=True)
+            return True
+
+        return False
+
+    def incremental_update(self, force: bool = False):
+        """
+        Apply buffered interactions to SBERT user profiles.
+
+        NCF model is not updated here (requires full retraining).
+        """
+        if not self.online_learning:
+            logger.warning("Online learning disabled; skipping incremental update.")
+            return
+
+        if not self.interaction_buffer:
+            logger.info("Online learning buffer empty; nothing to update.")
+            return
+
+        if not force and len(self.interaction_buffer) < self.buffer_size:
+            logger.info(
+                "Buffer not full (%d/%d). Skipping incremental update "
+                "(pass force=True to override).",
+                len(self.interaction_buffer),
+                self.buffer_size,
+            )
+            return
+
+        logger.info(
+            "Applying %d buffered interactions to SBERT user profiles...",
+            len(self.interaction_buffer),
+        )
+
+        if self.content_model:
+            for entry in self.interaction_buffer:
+                self.content_model.update_user_profile(
+                    user_id=entry["user_id"],
+                    book_id=entry["book_id"],
+                    strength=entry["strength"],
+                    interaction_type=entry["type"],
+                )
+            logger.info("✅ SBERT user profiles updated incrementally.")
+
+        if self.popularity is not None:
+            for entry in self.interaction_buffer:
+                book_id = entry["book_id"]
+                self.popularity[book_id] = self.popularity.get(book_id, 0) + 1
+
+        processed = len(self.interaction_buffer)
+        self.interaction_buffer = []
+        logger.info(
+            "Online learning update complete. Cleared %d buffered interactions. "
+            "Reminder: NCF model still uses the previous training snapshot.",
+            processed,
+        )
+
+    def get_buffer_status(self) -> Dict[str, object]:
+        """Return current buffer statistics for monitoring."""
+        return {
+            "enabled": self.online_learning,
+            "buffer_size": len(self.interaction_buffer),
+            "buffer_capacity": self.buffer_size,
+            "buffer_full": len(self.interaction_buffer) >= self.buffer_size
+            if self.online_learning
+            else False,
+            "note": "Only SBERT profiles are updated incrementally. NCF model requires full retrain.",
+        }

@@ -1,6 +1,7 @@
 """
 API Routes for Hybrid Neural Recommender (NCF + SBERT)
 """
+import math
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from src.api.schemas import *
 from src.models.hybrid_neural import HybridNeuralRecommender
@@ -25,11 +26,13 @@ def get_recommender():
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
     """Check if neural models are loaded and ready"""
-    try:
-        rec = get_recommender()
-        return HealthResponse(status="healthy", models_loaded=True)
-    except HTTPException:
+    if is_retraining:
+        return HealthResponse(status="retraining", models_loaded=True)
+
+    if recommender is None:
         return HealthResponse(status="no_model", models_loaded=False)
+
+    return HealthResponse(status="ok", models_loaded=True)
 
 @router.get("/recommendations", response_model=RecommendationsResponse)
 async def get_recommendations(user_id: int, limit: int = 10):
@@ -126,38 +129,61 @@ async def get_diversity(book_id: int, limit: int = 5):
 @router.post("/feedback")
 async def record_feedback(request: FeedbackRequest):
     """
-    Record user feedback (for future online learning)
+    Record user feedback and optionally trigger SBERT online learning
     
-    Event types and their strengths (consistent with training data):
-    - view: 1.0 (implicit view signal)
-    - favorite: 5.0 (strong positive signal)
-    - rate: rating_value (1-5 explicit rating)
+    Event types and their strengths:
+    - rating: rating_value (1-5 explicit rating)
+    - history: 1.0 (implicit signal)
+    - favorite: 5.0 to add, 0.0 to remove (rating_value = 0)
     
-    Note: HybridNeuralRecommender doesn't support online learning yet.
-    This endpoint logs the feedback for future batch retraining.
+    Note: Online learning updates SBERT user profiles only.
+    NCF model still requires batch retraining.
     """
     rec = get_recommender()
     
-    # Map event to strength (MUST match db_loader.py!)
-    strength_map = {
-        'view': 1.0,
-        'favorite': 5.0,  # Matches training data
-        'rate': request.rating_value if request.rating_value else 3.0
-    }
+    # Map event to interaction strength
+    if request.event == 'rating':
+        if not request.rating_value or request.rating_value < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="rating_value (1-5) is required for 'rating' event"
+            )
+        strength = float(request.rating_value)
+    elif request.event == 'favorite':
+        strength = 0.0 if request.rating_value == 0 else 5.0
+    elif request.event == 'history':
+        strength = 1.0
+    else:
+        strength = 1.0
     
-    strength = strength_map.get(request.event, 1.0)
+    logger.info(
+        "Feedback: user=%s, book=%s, event=%s, strength=%.2f",
+        request.user_id,
+        request.book_id,
+        request.event,
+        strength,
+    )
     
-    logger.info(f"📝 Feedback recorded: User {request.user_id} -> Book {request.book_id} "
-                f"(event={request.event}, strength={strength})")
-    logger.info("⚠️  Neural model requires batch retraining. Use /retrain endpoint.")
+    if rec.online_learning:
+        buffer_triggered = rec.add_interaction(
+            user_id=request.user_id,
+            book_id=request.book_id,
+            strength=strength,
+            interaction_type=request.event
+        )
+        buffer_status = rec.get_buffer_status()
+        return {
+            "status": "recorded",
+            "online_learning": True,
+            "buffer_triggered_update": buffer_triggered,
+            "buffer_status": buffer_status,
+            "note": "SBERT profiles updated incrementally. NCF model requires retrain for collaborative signals."
+        }
     
     return {
         "status": "recorded",
-        "message": "Feedback logged. Neural model requires batch retraining.",
-        "user_id": request.user_id,
-        "book_id": request.book_id,
-        "event": request.event,
-        "strength": strength
+        "online_learning": False,
+        "message": "Feedback logged. Enable online learning or trigger retrain to apply updates."
     }
 
 @router.get("/model/info")
@@ -169,14 +195,9 @@ async def get_model_info():
         "status": "loaded",
         "model_type": "HybridNeuralRecommender",
         "alpha": rec.alpha,
-        "ncf_model": {
-            "num_users": len(rec.ncf_model.user_id_map) if rec.ncf_model and rec.ncf_model.user_id_map else 0,
-            "num_items": len(rec.ncf_model.item_id_map) if rec.ncf_model and rec.ncf_model.item_id_map else 0,
-            "gmf_dim": rec.ncf_model.gmf_dim if rec.ncf_model else 0,
-            "mlp_dims": rec.ncf_model.mlp_dims if rec.ncf_model else [],
-            "device": str(rec.ncf_model.device) if rec.ncf_model else "unknown"
-        } if rec.ncf_model else None,
-        "sbert_model": {
+        "online_learning": rec.get_buffer_status() if rec.online_learning else {"enabled": False},
+        "ncf_model": None,
+        "content_model": {
             "num_books": len(rec.content_model.book_ids) if rec.content_model and rec.content_model.book_ids is not None else 0,
             "num_user_profiles": len(rec.content_model.user_profiles) if rec.content_model and rec.content_model.user_profiles else 0,
             "embedding_dim": rec.content_model.embeddings.shape[1] if rec.content_model and rec.content_model.embeddings is not None else 0,
@@ -184,8 +205,107 @@ async def get_model_info():
         } if rec.content_model else None,
         "is_retraining": is_retraining
     }
+
+    if rec.ncf_model:
+        def _safe_number(value):
+            if value is None:
+                return None
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                return None
+            return value
+
+        def _safe_metrics(metrics):
+            if not metrics:
+                return None
+            return {key: _safe_number(value) for key, value in metrics.items()}
+
+        training_history = getattr(rec.ncf_model, "training_history", [])
+        info["ncf_model"] = {
+            "num_users": len(rec.ncf_model.user_id_map) if rec.ncf_model.user_id_map else 0,
+            "num_items": len(rec.ncf_model.item_id_map) if rec.ncf_model.item_id_map else 0,
+            "gmf_dim": rec.ncf_model.gmf_dim,
+            "mlp_dims": rec.ncf_model.mlp_dims,
+            "training_params": {
+                "epochs": rec.ncf_model.epochs,
+                "dropout": rec.ncf_model.dropout,
+                "learning_rate": rec.ncf_model.learning_rate,
+                "weight_decay": rec.ncf_model.weight_decay,
+                "batch_size": rec.ncf_model.batch_size,
+            },
+            "training_history": [_safe_number(value) for value in training_history] if training_history else [],
+            "last_training_loss": _safe_number(getattr(rec.ncf_model, "last_training_loss", None)),
+            "evaluation_metrics": _safe_metrics(getattr(rec.ncf_model, "last_evaluation_metrics", None))
+        }
     
     return info
+
+@router.post("/online-learning/update")
+async def trigger_incremental_update(force: bool = False):
+    """
+    Trigger incremental SBERT updates using buffered interactions.
+    """
+    rec = get_recommender()
+    
+    if not rec.online_learning:
+        raise HTTPException(
+            status_code=400,
+            detail="Online learning is disabled. Enable it first with POST /online-learning/enable"
+        )
+    
+    buffer_status_before = rec.get_buffer_status()
+    rec.incremental_update(force=force)
+    buffer_status_after = rec.get_buffer_status()
+    processed = max(
+        0,
+        int(buffer_status_before.get("buffer_size") or 0)
+        - int(buffer_status_after.get("buffer_size") or 0)
+    )
+    status = "updated" if processed > 0 else "skipped"
+    
+    response = {
+        "status": status,
+        "before": buffer_status_before,
+        "after": buffer_status_after,
+        "interactions_processed": processed,
+        "note": "SBERT profiles refreshed. NCF model still uses previous training snapshot."
+    }
+    
+    if status == "skipped":
+        response["message"] = "Buffer chưa đạt ngưỡng, chưa có cập nhật nào được thực hiện."
+    
+    return response
+
+@router.post("/online-learning/enable")
+async def enable_online_learning(buffer_size: int = 100):
+    """Enable SBERT online learning for hybrid neural recommender."""
+    if buffer_size < 10 or buffer_size > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="buffer_size must be between 10 and 1000"
+        )
+    
+    rec = get_recommender()
+    rec.enable_online_learning(buffer_size=buffer_size)
+    
+    return {
+        "status": "enabled",
+        "buffer_size": buffer_size,
+        "note": "Only SBERT profiles update incrementally. NCF model requires full retrain."
+    }
+
+@router.post("/online-learning/disable")
+async def disable_online_learning():
+    """Disable SBERT online learning."""
+    rec = get_recommender()
+    rec.disable_online_learning()
+    
+    return {"status": "disabled"}
+
+@router.get("/online-learning/status")
+async def get_online_learning_status():
+    """Return current online learning buffer status."""
+    rec = get_recommender()
+    return rec.get_buffer_status()
 
 @router.post("/retrain")
 async def trigger_retrain(background_tasks: BackgroundTasks):

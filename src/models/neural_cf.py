@@ -189,6 +189,9 @@ class NeuralCFModel:
         self.epochs = epochs
         self.weight_decay = weight_decay
         self.random_state = random_state
+        self.training_history: List[float] = []
+        self.last_training_loss: Optional[float] = None
+        self.last_evaluation_metrics: Optional[Dict[str, float]] = None
         
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -250,6 +253,9 @@ class NeuralCFModel:
             logger.warning("No usable interactions after preprocessing; skipping training")
             return
 
+        self.training_history = []
+        self.last_training_loss = None
+
         # Initialize model
         self.model = NeuMF(
             n_users=n_users,
@@ -296,7 +302,9 @@ class NeuralCFModel:
                 total_loss += loss.item()
                 n_batches += 1
             
-            avg_loss = total_loss / n_batches
+            avg_loss = total_loss / n_batches if n_batches else float("nan")
+            self.training_history.append(float(avg_loss))
+            self.last_training_loss = float(avg_loss)
             
             if (epoch + 1) % 5 == 0:
                 logger.info(f"Epoch {epoch+1}/{self.epochs}, Loss: {avg_loss:.4f}")
@@ -425,6 +433,7 @@ class NeuralCFModel:
         if top_k > 0:
             metrics[f"hit_rate@{top_k}"] = self._hit_rate_at_k(filtered, top_k=top_k)
 
+        self.last_evaluation_metrics = metrics
         return metrics
 
     def cross_validate(
@@ -592,7 +601,10 @@ class NeuralCFModel:
             'batch_size': self.batch_size,
             'epochs': self.epochs,
             'weight_decay': self.weight_decay,
-            'random_state': self.random_state
+            'random_state': self.random_state,
+            'training_history': self.training_history,
+            'last_training_loss': self.last_training_loss,
+            'last_evaluation_metrics': self.last_evaluation_metrics,
         }
         
         torch.save(save_dict, path)
@@ -620,6 +632,9 @@ class NeuralCFModel:
         model.item_id_map = save_dict['item_id_map']
         model.user_id_reverse = save_dict['user_id_reverse']
         model.item_id_reverse = save_dict['item_id_reverse']
+        model.training_history = save_dict.get('training_history', [])
+        model.last_training_loss = save_dict.get('last_training_loss')
+        model.last_evaluation_metrics = save_dict.get('last_evaluation_metrics')
         
         if save_dict['model_state']:
             n_users = len(model.user_id_map)

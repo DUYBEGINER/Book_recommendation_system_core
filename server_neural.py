@@ -89,4 +89,4 @@ app.include_router(router, prefix="/api/v1", tags=["neural-recommendations"])
 
 if __name__ == "__main__":
     logger.info("🚀 Starting Hybrid Neural Recommender Server...")
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8002)

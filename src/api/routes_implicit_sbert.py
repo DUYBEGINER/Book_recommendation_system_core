@@ -198,6 +198,7 @@ async def get_model_info():
     
     info = {
         "status": "loaded",
+        "model_type": "HybridImplicitSBERTRecommender",
         "alpha": rec.alpha,
         "online_learning": rec.get_buffer_status() if rec.online_learning else {"enabled": False},
         "cf_model": {
@@ -212,7 +213,7 @@ async def get_model_info():
         "content_model": {
             "num_books": len(rec.content_model.book_ids) if rec.content_model and rec.content_model.book_ids is not None else 0,
             "num_user_profiles": len(rec.content_model.user_profiles) if rec.content_model and rec.content_model.user_profiles else 0,
-            "feature_dim": rec.content_model.embeddings.shape[1] if rec.content_model and rec.content_model.embeddings is not None else 0,
+            "embedding_dim": rec.content_model.embeddings.shape[1] if rec.content_model and rec.content_model.embeddings is not None else 0,
             "model_type": "SBERT",
             "model_name": rec.content_model.model_name if rec.content_model else None
         } if rec.content_model else None,
@@ -244,13 +245,25 @@ async def trigger_incremental_update(force: bool = False):
     rec.incremental_update(force=force)
     
     buffer_status_after = rec.get_buffer_status()
+    processed = max(
+        0,
+        int(buffer_status_before.get("buffer_size") or 0)
+        - int(buffer_status_after.get("buffer_size") or 0)
+    )
+    status = "updated" if processed > 0 else "skipped"
     
-    return {
-        "status": "updated",
+    response = {
+        "status": status,
         "before": buffer_status_before,
         "after": buffer_status_after,
+        "interactions_processed": processed,
         "note": "Only SBERT profiles updated. ALS requires full retrain."
     }
+    
+    if status == "skipped":
+        response["message"] = "Buffer chưa đạt ngưỡng, chưa có cập nhật nào được thực hiện."
+    
+    return response
 
 @router.post("/online-learning/enable")
 async def enable_online_learning(buffer_size: int = 100):
