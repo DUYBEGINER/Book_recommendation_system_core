@@ -1,16 +1,16 @@
 """
-Training script for Hybrid Recommender (ALS + Ridge)
+Training script for Hybrid Neural Recommender (NCF + SBERT)
 
 Usage:
-    python train.py --evaluate --alpha 0.6
-    python train.py --ridge-alpha 1.0
+    python train_neural.py --evaluate --alpha 0.6
+    python train_neural.py --ncf-epochs 50 --gmf-dim 128
 """
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from src.data.db_loader import DatabaseLoader
-from src.models.hybrid_Ridge import HybridRecommender
+from src.models.hybrid_neural import HybridNeuralRecommender
 from src.utils.config import get_settings
 from src.utils.logging_config import logger
 from src.utils.evaluation import RecommenderEvaluator, DataSplitter
@@ -18,7 +18,7 @@ from src.utils.evaluation import RecommenderEvaluator, DataSplitter
 
 def main():
     # ==================== Parse Arguments ====================
-    parser = argparse.ArgumentParser(description='Train Hybrid Recommender (ALS + Ridge)')
+    parser = argparse.ArgumentParser(description='Train Hybrid Neural Recommender (NCF + SBERT)')
     
     # Data args
     parser.add_argument('--db-uri', type=str, help='Database URI')
@@ -26,12 +26,18 @@ def main():
     
     # Model args
     parser.add_argument('--alpha', type=float, default=0.6,
-                       help='CF weight (0-1), content weight = 1-alpha')
-    parser.add_argument('--ridge-alpha', type=float, default=1.0,
-                       help='Ridge regularization parameter')
+                       help='NCF weight (0-1), SBERT weight = 1-alpha')
+    parser.add_argument('--gmf-dim', type=int, default=64,
+                       help='GMF embedding dimension')
+    parser.add_argument('--ncf-epochs', type=int, default=20,
+                       help='NCF training epochs')
+    parser.add_argument('--ncf-batch-size', type=int, default=256,
+                       help='NCF batch size')
+    parser.add_argument('--device', type=str, default=None,
+                       help='Device: cuda or cpu (auto-detect if None)')
     
     # Training args
-    parser.add_argument('--artifacts-dir', type=str, default='./artifacts',
+    parser.add_argument('--artifacts-dir', type=str, default='./artifacts_neural',
                        help='Directory to save models')
     parser.add_argument('--evaluate', action='store_true',
                        help='Run evaluation on test set')
@@ -51,11 +57,14 @@ def main():
     
     # ==================== Print Configuration ====================
     logger.info("="*60)
-    logger.info("TRAINING HYBRID RECOMMENDER (ALS + RIDGE)")
+    logger.info("TRAINING HYBRID NEURAL RECOMMENDER (NCF + SBERT)")
     logger.info("="*60)
     logger.info(f"Model Configuration:")
-    logger.info(f"  Alpha (CF weight): {args.alpha}")
-    logger.info(f"  Ridge alpha: {args.ridge_alpha}")
+    logger.info(f"  Alpha (NCF weight): {args.alpha}")
+    logger.info(f"  GMF dimension: {args.gmf_dim}")
+    logger.info(f"  NCF epochs: {args.ncf_epochs}")
+    logger.info(f"  NCF batch size: {args.ncf_batch_size}")
+    logger.info(f"  Device: {args.device or 'auto-detect'}")
     logger.info(f"  Artifacts dir: {artifacts_dir}")
     logger.info(f"  Evaluation: {args.evaluate}")
     if args.evaluate:
@@ -95,10 +104,13 @@ def main():
         test_df = None
     
     # ==================== Train Model ====================
-    logger.info("Initializing Hybrid Recommender...")
-    recommender = HybridRecommender(
+    logger.info("Initializing Hybrid Neural Recommender...")
+    recommender = HybridNeuralRecommender(
         alpha=args.alpha,
-        ridge_alpha=args.ridge_alpha
+        gmf_dim=args.gmf_dim,
+        ncf_epochs=args.ncf_epochs,
+        ncf_batch_size=args.ncf_batch_size,
+        device=args.device
     )
     
     logger.info("Training model...")

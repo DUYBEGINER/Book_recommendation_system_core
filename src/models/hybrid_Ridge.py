@@ -1,9 +1,13 @@
 """
 Hybrid Recommender combining CF and Content-Based with User Profiles
+With Online Learning support for incremental updates
 """
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 import pandas as pd
+import numpy as np
+from datetime import datetime
+from collections import deque
 
 from src.models.collaborative import CollaborativeModel
 from src.features.content_features import ContentBasedModel
@@ -18,45 +22,52 @@ class HybridRecommender:
     3. Popularity fallback
     """
     
-    def __init__(self, alpha: float = 0.6, use_ridge: bool = True, ridge_alpha: float = 1.0):
+    def __init__(self, alpha: float = 0.6, ridge_alpha: float = 1.0,
+                 online_learning: bool = True, buffer_size: int = 100):
         """
         Args:
             alpha: Weight for CF vs Content
-            use_ridge: Use Ridge regression (True) or weighted average (False)
             ridge_alpha: Ridge regularization parameter
+            online_learning: Enable online learning (incremental updates)
+            buffer_size: Number of interactions to buffer before batch update
         """
         self.alpha = alpha
-        self.use_ridge = use_ridge
         self.ridge_alpha = ridge_alpha
+        self.online_learning = online_learning
+        self.buffer_size = buffer_size
         
         self.cf_model = None
-        self.content_model = None
+        self.content_model = None  # RidgeContentModel
         self.popularity = None
+        
+        # Online learning components
+        if self.online_learning:
+            self.interaction_buffer = deque(maxlen=buffer_size)
+            self.buffer_stats = {
+                'total_added': 0,
+                'total_updates': 0,
+                'last_update': None
+            }
+            logger.info(f"Online learning enabled with buffer size {buffer_size}")
     
     def train(self, books_df: pd.DataFrame, interactions_df: pd.DataFrame):
         """Train both CF and Content models"""
-        logger.info(f"Training hybrid recommender (Ridge={self.use_ridge})...")
+        logger.info("Training hybrid recommender with Ridge regression...")
         
-        # 1. Content-Based Model
-        if self.use_ridge:
-            logger.info("Using Ridge Regression for content-based...")
-            self.content_model = RidgeContentModel(alpha=self.ridge_alpha)
-            self.content_model.fit(books_df)
-            self.content_model.train_user_models(interactions_df, min_interactions=5)
-        else:
-            logger.info("Using weighted average for content-based...")
-            from src.features.content_features import ContentBasedModel
-            self.content_model = ContentBasedModel()
-            self.content_model.fit(books_df)
-            self.content_model.build_user_profiles(interactions_df)
+        # 1. Content-Based Model (Ridge only)
+        logger.info("Building Ridge content-based model...")
+        self.content_model = RidgeContentModel(alpha=self.ridge_alpha)
+        self.content_model.fit(books_df)
+        self.content_model.train_user_models(interactions_df, min_interactions=5)
         
-        # 2. CF and popularity (same as before)
+        # 2. Collaborative Filtering
         logger.info("Training collaborative filtering model...")
         self.cf_model = CollaborativeModel(factors=64, iterations=30)
         self.cf_model.fit(interactions_df)
         
+        # 3. Popularity scores
         self._compute_popularity(interactions_df)
-        logger.info("Hybrid model trained")
+        logger.info("Hybrid model trained successfully")
     
     def _compute_popularity(self, interactions_df: pd.DataFrame):
         """Compute item popularity for fallback"""
@@ -103,35 +114,19 @@ class HybridRecommender:
         else:
             logger.debug(f"No CF results for user {user_id}, user not in training set")
         
-        # 2. Content-Based Filtering (using User Profile or Ridge Model)
-        if self.use_ridge:
-            # Ridge model: check user_models
-            if self.content_model and user_id in self.content_model.user_models:
-                try:
-                    content_results = self.content_model.recommend_for_user(
-                        user_id,
-                        top_k=limit * 2,
-                        filter_items=interacted_items
-                    )
-                    logger.debug(f"Ridge returned {len(content_results)} results for user {user_id}")
-                except Exception as e:
-                    logger.warning(f"Ridge failed for user {user_id}: {e}")
-            else:
-                logger.debug(f"No Ridge model for user {user_id}")
+        # 2. Content-Based Filtering (using Ridge Model)
+        if self.content_model and user_id in self.content_model.user_models:
+            try:
+                content_results = self.content_model.recommend_for_user(
+                    user_id,
+                    top_k=limit * 2,
+                    filter_items=interacted_items
+                )
+                logger.debug(f"Ridge returned {len(content_results)} results for user {user_id}")
+            except Exception as e:
+                logger.warning(f"Ridge failed for user {user_id}: {e}")
         else:
-            # Weighted average: check user_profiles
-            if self.content_model and user_id in self.content_model.user_profiles:
-                try:
-                    content_results = self.content_model.recommend_for_user(
-                        user_id,
-                        top_k=limit * 2,
-                        filter_items=interacted_items
-                    )
-                    logger.debug(f"Content returned {len(content_results)} results for user {user_id}")
-                except Exception as e:
-                    logger.warning(f"Content-based failed for user {user_id}: {e}")
-            else:
-                logger.debug(f"No content profile for user {user_id}")
+            logger.debug(f"No Ridge model for user {user_id}")
         
         # 3. Combine CF + Content with weighted average
         if cf_results or content_results:
@@ -271,7 +266,8 @@ class HybridRecommender:
         if not self.content_model:
             return []
         
-        return self.content_model.get_profile_keywords(user_id, top_n)
+        # Ridge model uses get_user_weights()
+        return self.content_model.get_user_weights(user_id, top_n)
     
     def save(self, artifacts_dir: Path):
         """Save all models"""
@@ -283,20 +279,19 @@ class HybridRecommender:
         if self.content_model:
             self.content_model.save(artifacts_dir / 'content_model.pkl')
         
-        # Save hybrid metadata including use_ridge flag
+        # Save hybrid metadata
         import pickle
         with open(artifacts_dir / 'hybrid_metadata.pkl', 'wb') as f:
             pickle.dump({
                 'alpha': self.alpha,
                 'popularity': self.popularity,
-                'use_ridge': self.use_ridge,  # ✅ Save model type
                 'ridge_alpha': self.ridge_alpha
             }, f)
         
-        logger.info(f"Saved hybrid model to {artifacts_dir} (Ridge={self.use_ridge})")
+        logger.info(f"Saved hybrid model to {artifacts_dir}")
     
     @classmethod
-    def load(cls, artifacts_dir: Path, alpha: float = None, use_ridge: bool = None):
+    def load(cls, artifacts_dir: Path, alpha: float = None):
         """Load saved models"""
         # Load metadata
         metadata_path = artifacts_dir / 'hybrid_metadata.pkl'
@@ -305,50 +300,209 @@ class HybridRecommender:
             with open(metadata_path, 'rb') as f:
                 metadata = pickle.load(f)
             alpha = alpha or metadata.get('alpha', 0.6)
-            use_ridge = use_ridge if use_ridge is not None else metadata.get('use_ridge', False)
             ridge_alpha = metadata.get('ridge_alpha', 1.0)
             popularity = metadata.get('popularity')
         else:
             alpha = alpha or 0.6
-            use_ridge = use_ridge if use_ridge is not None else False
             ridge_alpha = 1.0
             popularity = None
         
-        model = cls(alpha=alpha, use_ridge=use_ridge, ridge_alpha=ridge_alpha)
+        model = cls(alpha=alpha, ridge_alpha=ridge_alpha)
         
         # Load CF model
         cf_path = artifacts_dir / 'cf_model.pkl'
         if cf_path.exists():
             model.cf_model = CollaborativeModel.load(cf_path)
         
-        # Load Content model (auto-detect type)
+        # Load Ridge Content model
         content_path = artifacts_dir / 'content_model.pkl'
         if content_path.exists():
-            # Try to detect model type from file
-            import pickle
-            with open(content_path, 'rb') as f:
-                data = pickle.load(f)
-            
-            # Check if it's Ridge model (has user_models) or Weighted (has user_profiles)
-            if 'user_models' in data:
-                # Ridge model
-                from src.features.content_features_Ridge import RidgeContentModel
-                model.content_model = RidgeContentModel.load(content_path)
-                model.use_ridge = True
-                logger.info("Loaded Ridge content model")
-            elif 'user_profiles' in data:
-                # Weighted average model
-                model.content_model = ContentBasedModel.load(content_path)
-                model.use_ridge = False
-                logger.info("Loaded weighted average content model")
-            else:
-                logger.warning("Unknown content model format")
+            from src.features.content_features_Ridge import RidgeContentModel
+            model.content_model = RidgeContentModel.load(content_path)
+            logger.info("Loaded Ridge content model")
         
         model.popularity = popularity
         
-        logger.info(f"Loaded hybrid model (alpha={model.alpha}, use_ridge={model.use_ridge})")
+        logger.info(f"Loaded hybrid model (alpha={model.alpha})")
         
         return model
+    
+    # ==================== Online Learning Methods ====================
+    
+    def add_interaction(self, user_id: int, book_id: int, strength: float, 
+                       interaction_type: str = 'implicit'):
+        """
+        Add a new interaction for online learning
+        
+        Args:
+            user_id: User ID
+            book_id: Book ID
+            strength: Interaction strength (1-5 for ratings, 1.0-3.0 for implicit)
+            interaction_type: Type of interaction (rating, view, favorite, bookmark)
+        
+        Returns:
+            bool: True if buffer triggered update, False otherwise
+        """
+        if not self.online_learning:
+            logger.warning("Online learning is disabled. Call enable_online_learning() first.")
+            return False
+        
+        # Add to buffer
+        interaction = {
+            'user_id': user_id,
+            'book_id': book_id,
+            'strength': strength,
+            'type': interaction_type,
+            'ts': datetime.now()
+        }
+        self.interaction_buffer.append(interaction)
+        self.buffer_stats['total_added'] += 1
+        
+        logger.debug(f"Added interaction: user={user_id}, book={book_id}, "
+                    f"strength={strength}, type={interaction_type}")
+        
+        # Check if buffer is full → trigger update
+        if len(self.interaction_buffer) >= self.buffer_size:
+            logger.info(f"Buffer full ({len(self.interaction_buffer)} interactions), "
+                       f"triggering incremental update...")
+            self.incremental_update()
+            return True
+        
+        return False
+    
+    def incremental_update(self, force: bool = False):
+        """
+        Perform incremental model update with buffered interactions
+        
+        Args:
+            force: Force update even if buffer is not full
+        """
+        if not self.online_learning:
+            logger.warning("Online learning is disabled")
+            return
+        
+        if len(self.interaction_buffer) == 0:
+            logger.info("No interactions in buffer to update")
+            return
+        
+        if not force and len(self.interaction_buffer) < self.buffer_size:
+            logger.info(f"Buffer has only {len(self.interaction_buffer)} interactions, "
+                       f"skipping update (threshold: {self.buffer_size})")
+            return
+        
+        logger.info(f"Starting incremental update with {len(self.interaction_buffer)} interactions...")
+        
+        # Convert buffer to DataFrame
+        buffer_df = pd.DataFrame(list(self.interaction_buffer))
+        
+        # 1. Update Content-Based Model (Ridge or Weighted)
+        self._update_content_model(buffer_df)
+        
+        # 2. Update Popularity
+        self._update_popularity(buffer_df)
+        
+        # 3. Update CF model (more complex, requires ALS re-fitting)
+        # For now, we'll collect these for next full retrain
+        # In production, you might use incremental matrix factorization
+        logger.info("CF model update skipped (requires full retrain for ALS)")
+        logger.info("💡 For real incremental CF, consider switching to SGD-based models")
+        
+        # Clear buffer
+        self.interaction_buffer.clear()
+        self.buffer_stats['total_updates'] += 1
+        self.buffer_stats['last_update'] = datetime.now()
+        
+        logger.info(f"Incremental update completed! Total updates: {self.buffer_stats['total_updates']}")
+    
+    def _update_content_model(self, new_interactions_df: pd.DataFrame):
+        """Update content-based model with new interactions"""
+        if not self.content_model:
+            logger.warning("Content model not initialized")
+            return
+        
+        logger.info("Updating Ridge content-based model...")
+        
+        # Ridge model: Retrain user models for affected users
+        affected_users = new_interactions_df['user_id'].unique()
+        logger.info(f"Retraining Ridge models for {len(affected_users)} affected users...")
+        
+        for user_id in affected_users:
+            # Get user's OLD interactions
+            old_interactions = self.content_model.user_interactions.get(user_id, {})
+            
+            # Merge with NEW interactions
+            user_new = new_interactions_df[new_interactions_df['user_id'] == user_id]
+            for _, row in user_new.iterrows():
+                old_interactions[row['book_id']] = row['strength']
+            
+            # Update user_interactions
+            self.content_model.user_interactions[user_id] = old_interactions
+            
+            # Retrain this user's Ridge model
+            if len(old_interactions) >= 5:  # min_interactions threshold
+                X_train, y_train = self.content_model._prepare_user_training_data(old_interactions)
+                
+                if X_train is not None and len(X_train) > 0:
+                    from sklearn.linear_model import Ridge
+                    ridge_model = Ridge(alpha=self.content_model.alpha)
+                    ridge_model.fit(X_train, y_train)
+                    self.content_model.user_models[user_id] = ridge_model
+        
+        logger.info(f"✅ Updated Ridge models for {len(affected_users)} users")
+    
+    def _update_popularity(self, new_interactions_df: pd.DataFrame):
+        """Update popularity statistics with new interactions"""
+        if self.popularity is None:
+            self.popularity = pd.Series(dtype=int)
+        
+        logger.info("Updating popularity scores...")
+        
+        # Count new interactions per book
+        new_counts = new_interactions_df['book_id'].value_counts()
+        
+        # Merge with existing popularity
+        for book_id, count in new_counts.items():
+            if book_id in self.popularity.index:
+                self.popularity[book_id] += count
+            else:
+                self.popularity[book_id] = count
+        
+        # Re-sort
+        self.popularity = self.popularity.sort_values(ascending=False)
+        
+        logger.info(f"Popularity updated for {len(new_counts)} books")
+    
+    def get_buffer_status(self) -> Dict:
+        """Get online learning buffer status"""
+        if not self.online_learning:
+            return {'enabled': False}
+        
+        return {
+            'enabled': True,
+            'buffer_size': len(self.interaction_buffer),
+            'buffer_capacity': self.buffer_size,
+            'fill_percentage': len(self.interaction_buffer) / self.buffer_size * 100,
+            'total_added': self.buffer_stats['total_added'],
+            'total_updates': self.buffer_stats['total_updates'],
+            'last_update': self.buffer_stats['last_update'].isoformat() if self.buffer_stats['last_update'] else None
+        }
+    
+    def enable_online_learning(self, buffer_size: int = 100):
+        """Enable online learning after model is loaded"""
+        self.online_learning = True
+        self.buffer_size = buffer_size
+        self.interaction_buffer = deque(maxlen=buffer_size)
+        self.buffer_stats = {
+            'total_added': 0,
+            'total_updates': 0,
+            'last_update': None
+        }
+        logger.info(f"Online learning enabled with buffer size {buffer_size}")
+    
+    def disable_online_learning(self):
+        """Disable online learning"""
+        self.online_learning = False
+        logger.info("Online learning disabled")
 
 
 

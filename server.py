@@ -57,7 +57,12 @@ async def startup_event():
     if artifacts_dir.exists():
         try:
             routes.recommender = HybridRecommender.load(artifacts_dir, alpha=settings.alpha)
+            
+            # Enable online learning by default
+            routes.recommender.enable_online_learning(buffer_size=100)
+            
             logger.info("Models loaded successfully")
+            logger.info("Online learning enabled with buffer size 100")
         except Exception as e:
             logger.error(f"Failed to load models: {e}")
     else:

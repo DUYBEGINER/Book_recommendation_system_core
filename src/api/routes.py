@@ -87,10 +87,61 @@ async def get_diversity(book_id: int, limit: int = 5):
 
 @router.post("/feedback")
 async def record_feedback(request: FeedbackRequest):
-    """Record user feedback (for online learning - simplified)"""
-    # In production, this would update interaction logs and trigger retraining
-    logger.info(f"Feedback: user={request.user_id}, book={request.book_id}, event={request.event}")
-    return {"status": "recorded"}
+    """
+    Record user feedback and trigger online learning
+    
+    Event types and their strengths:
+    - view: 1.0 (implicit positive signal)
+    - bookmark: 2.0 (saved for later)
+    - favorite: 3.0 (strong positive signal)
+    - rate: rating_value (1-5 explicit rating)
+    """
+    rec = get_recommender()
+    
+    # Map event to strength
+    strength_map = {
+        'view': 1.0,
+        'bookmark': 2.0,
+        'favorite': 3.0,
+        'rate': request.rating_value if request.rating_value else 3.0
+    }
+    
+    strength = strength_map.get(request.event, 1.0)
+    
+    # Validate rating_value for 'rate' event
+    if request.event == 'rate' and not request.rating_value:
+        raise HTTPException(
+            status_code=400, 
+            detail="rating_value is required for 'rate' event"
+        )
+    
+    logger.info(f"Feedback: user={request.user_id}, book={request.book_id}, "
+               f"event={request.event}, strength={strength}")
+    
+    # Add to online learning buffer
+    if rec.online_learning:
+        buffer_triggered = rec.add_interaction(
+            user_id=request.user_id,
+            book_id=request.book_id,
+            strength=strength,
+            interaction_type=request.event
+        )
+        
+        buffer_status = rec.get_buffer_status()
+        
+        return {
+            "status": "recorded",
+            "online_learning": True,
+            "buffer_triggered_update": buffer_triggered,
+            "buffer_status": buffer_status
+        }
+    else:
+        # Fallback: just log (online learning disabled)
+        return {
+            "status": "recorded",
+            "online_learning": False,
+            "message": "Feedback logged, but online learning is disabled"
+        }
 
 @router.get("/model/info")
 async def get_model_info():
@@ -100,6 +151,7 @@ async def get_model_info():
     info = {
         "status": "loaded",
         "alpha": rec.alpha,
+        "online_learning": rec.get_buffer_status() if rec.online_learning else {"enabled": False},
         "cf_model": {
             "num_users": len(rec.cf_model.user_ids) if rec.cf_model else 0,
             "num_items": len(rec.cf_model.item_ids) if rec.cf_model else 0,
@@ -107,12 +159,72 @@ async def get_model_info():
         } if rec.cf_model else None,
         "content_model": {
             "num_books": len(rec.content_model.book_ids) if rec.content_model else 0,
-            "feature_dim": rec.content_model.feature_matrix.shape[1] if rec.content_model else 0
+            "feature_dim": rec.content_model.feature_matrix.shape[1] if rec.content_model else 0,
+            "model_type": "Ridge"
         } if rec.content_model else None,
         "is_retraining": is_retraining
     }
     
     return info
+
+@router.post("/online-learning/update")
+async def trigger_incremental_update(force: bool = False):
+    """
+    Trigger incremental model update with buffered interactions
+    
+    Args:
+        force: Force update even if buffer is not full
+    """
+    rec = get_recommender()
+    
+    if not rec.online_learning:
+        raise HTTPException(
+            status_code=400,
+            detail="Online learning is disabled. Enable it first with POST /online-learning/enable"
+        )
+    
+    buffer_status_before = rec.get_buffer_status()
+    
+    rec.incremental_update(force=force)
+    
+    buffer_status_after = rec.get_buffer_status()
+    
+    return {
+        "status": "updated",
+        "before": buffer_status_before,
+        "after": buffer_status_after
+    }
+
+@router.post("/online-learning/enable")
+async def enable_online_learning(buffer_size: int = 100):
+    """Enable online learning"""
+    if buffer_size < 10 or buffer_size > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="buffer_size must be between 10 and 1000"
+        )
+    
+    rec = get_recommender()
+    rec.enable_online_learning(buffer_size=buffer_size)
+    
+    return {
+        "status": "enabled",
+        "buffer_size": buffer_size
+    }
+
+@router.post("/online-learning/disable")
+async def disable_online_learning():
+    """Disable online learning"""
+    rec = get_recommender()
+    rec.disable_online_learning()
+    
+    return {"status": "disabled"}
+
+@router.get("/online-learning/status")
+async def get_online_learning_status():
+    """Get online learning buffer status"""
+    rec = get_recommender()
+    return rec.get_buffer_status()
 
 @router.post("/retrain")
 async def trigger_retrain(background_tasks: BackgroundTasks):
