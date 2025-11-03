@@ -77,3 +77,6 @@ htmlcov/
 *.tmp
 *.bak
 *.swp
+
+**/artifacts/**
+**/artifacts_neural/**
