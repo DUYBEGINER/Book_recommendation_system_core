@@ -4,11 +4,12 @@ Production-ready hybrid recommendation microservice for book e-commerce platform
 
 ## Features
 
-- **Dual Recommendation Engines**:
+- **Triple Recommendation Engines**:
   - **Classic Server** (Port 8001): ALS + Ridge Regression with Online Learning
   - **Neural Server** (Port 8002): NCF + SBERT with Deep Semantic Understanding
+  - **Implicit+SBERT Server** (Port 8003): Implicit ALS + SBERT (Fast & Semantic)
 - **Hybrid Recommendations**: Combines collaborative filtering and content-based filtering
-- **Multi-signal**: Ratings (explicit), reading history, favorites, bookmarks (implicit)
+- **Multi-signal**: Ratings (explicit), reading history, favorites (implicit)
 - **Cold-start handling**: Popularity and content-based fallbacks
 - **Online Learning**: Incremental updates without full retraining (Classic only)
 - **Fast inference**: <200ms for top-10 recommendations with 100k+ books
@@ -17,18 +18,21 @@ Production-ready hybrid recommendation microservice for book e-commerce platform
 
 ## Quick Start
 
-### Option 1: Launch Both Servers
+### Option 1: Launch All Servers
 
 ```bash
-# Train both models
+# Train all models
 python train.py --evaluate
 python train_neural.py --evaluate
+python train_implicit_sbert.py --evaluate
 
-# Start both servers
+# Start servers individually
+python server.py              # Port 8001
+python server_neural.py       # Port 8002
+python server_implicit_sbert.py  # Port 8003
+
+# Or use launcher for Classic + Neural
 python start_servers.py
-
-# Classic API: http://localhost:8001
-# Neural API:  http://localhost:8002
 ```
 
 ### Option 2: Classic Server Only (Fast, Online Learning)
@@ -46,8 +50,6 @@ python test_online_api.py
 
 ### Option 3: Neural Server Only (Semantic, Deep Learning)
 
-### Option 3: Neural Server Only (Semantic, Deep Learning)
-
 ```bash
 # Train neural model
 python train_neural.py --evaluate
@@ -57,6 +59,19 @@ python server_neural.py
 
 # Test API
 python test_neural_api.py
+```
+
+### Option 4: Implicit+SBERT Server (Fast & Semantic)
+
+```bash
+# Train model
+python train_implicit_sbert.py --evaluate
+
+# Start server
+python server_implicit_sbert.py
+
+# Test API
+python test_implicit_sbert_api.py
 ```
 
 ### Docker Compose (Recommended for Production)
@@ -96,6 +111,20 @@ uvicorn serve:app --reload --port 8001
 
 ## API Documentation
 
+### Server Comparison
+
+| Feature | Classic (8001) | Neural (8002) | Implicit+SBERT (8003) |
+|---------|----------------|---------------|----------------------|
+| **CF Model** | ALS + Ridge | NCF (Deep Learning) | Implicit ALS |
+| **Content Model** | Ridge Regression | SBERT | SBERT |
+| **Training Time** | ~15 sec | ~2-5 min | ~30 sec |
+| **Inference Speed** | <50ms | ~100ms | <80ms |
+| **Online Learning** | ✅ Yes | ❌ No | ❌ No |
+| **Accuracy** | Good | Best | Very Good |
+| **Semantic Understanding** | ❌ No | ✅ Yes | ✅ Yes |
+| **Resource Usage** | Low | High (GPU recommended) | Medium |
+| **Best For** | Production, real-time | High accuracy, rich data | Fast semantic search |
+
 ### Classic Server (Port 8001) - ALS + Ridge
 
 See full documentation: [Online Learning Guide](docs/ONLINE_LEARNING.md)
@@ -113,7 +142,15 @@ See full documentation: [Neural Server Guide](docs/NEURAL_SERVER.md)
 **Key Features:**
 - ✅ Semantic understanding (SBERT embeddings)
 - ✅ Deep learning (Neural Collaborative Filtering)
-- ✅ Better accuracy on large datasets
+- ✅ Best accuracy on large datasets
+- ⚠️ Requires batch retraining (no online learning)
+
+### Implicit+SBERT Server (Port 8003) - Fast & Semantic
+
+**Key Features:**
+- ✅ Semantic understanding (SBERT embeddings)
+- ✅ Fast Implicit ALS collaborative filtering
+- ✅ Good balance of speed and accuracy
 - ⚠️ Requires batch retraining (no online learning)
 
 ### Endpoints (Both Servers)
