@@ -299,7 +299,7 @@ class SBERTContentModel:
     
     @classmethod
     def load(cls, path: Path, device: str = None):
-        """Load saved model"""
+        """Load saved model from trusted checkpoint"""
         with open(path, 'rb') as f:
             data = pickle.load(f)
         

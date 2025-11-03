@@ -90,19 +90,19 @@ async def record_feedback(request: FeedbackRequest):
     """
     Record user feedback and trigger online learning
     
-    Event types and their strengths:
-    - view: 1.0 (implicit positive signal)
-    - bookmark: 2.0 (saved for later)
-    - favorite: 3.0 (strong positive signal)
+    Event types and their strengths (consistent with training data):
+    - view: 1.0 (implicit view signal - low confidence)
+    - favorite: 5.0 (strong positive signal - max rating)
     - rate: rating_value (1-5 explicit rating)
+    
+    Note: Strength values match db_loader.py for consistency
     """
     rec = get_recommender()
     
-    # Map event to strength
+    # Map event to strength (MUST match db_loader.py!)
     strength_map = {
-        'view': 1.0,
-        'bookmark': 2.0,
-        'favorite': 3.0,
+        'view': 1.0,        # Low signal
+        'favorite': 5.0,    # Strong positive (matches training data)
         'rate': request.rating_value if request.rating_value else 3.0
     }
     

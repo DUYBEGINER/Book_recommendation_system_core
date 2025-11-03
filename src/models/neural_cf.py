@@ -332,7 +332,8 @@ class NeuralCFModel:
     @classmethod
     def load(cls, path: Path, device: str = None):
         """Load saved model"""
-        save_dict = torch.load(path, map_location='cpu')
+        # weights_only=False is required to load NumPy objects from trusted checkpoints
+        save_dict = torch.load(path, map_location='cpu', weights_only=False)
         
         model = cls(
             gmf_dim=save_dict['gmf_dim'],
