@@ -1,414 +1,416 @@
-# Book Recommendation System
+# Hướng Dẫn Triển Khai Hệ Thống Gợi Ý Sách
 
-Production-ready hybrid recommendation microservice for book e-commerce platform.
+Tài liệu này hướng dẫn chi tiết cách huấn luyện và triển khai hai mô hình gợi ý:
+- **HybridImplicitSBERT**: Kết hợp Implicit ALS + SBERT
+- **HybridNeural**: Kết hợp Neural Collaborative Filtering (NCF) + SBERT
 
-## Features
+---
 
-- **Triple Recommendation Engines**:
-  - **Classic Server** (Port 8001): ALS + Ridge Regression with Online Learning
-  - **Neural Server** (Port 8002): NCF + SBERT with Deep Semantic Understanding
-  - **Implicit+SBERT Server** (Port 8003): Implicit ALS + SBERT (Fast & Semantic)
-- **Hybrid Recommendations**: Combines collaborative filtering and content-based filtering
-- **Multi-signal**: Ratings (explicit), reading history, favorites (implicit)
-- **Cold-start handling**: Popularity and content-based fallbacks
-- **Online Learning**: Incremental updates without full retraining (Classic only)
-- **Fast inference**: <200ms for top-10 recommendations with 100k+ books
-- **RESTful API**: FastAPI with OpenAPI documentation
-- **Production-ready**: Docker, PostgreSQL, logging, metrics
+## 🖥️ Yêu Cầu Hệ Thống
 
-## Quick Start
+### Phần Cứng Khuyến Nghị
 
-### Option 1: Launch All Servers
+| Thành Phần | HybridImplicitSBERT | HybridNeural |
+|------------|---------------------|--------------|
+| **RAM** | ≥ 8GB | ≥ 16GB |
+| **CPU** | 4+ cores | 8+ cores |
+| **GPU** | Không bắt buộc | Khuyến nghị (CUDA) |
+| **Disk** | ≥ 5GB | ≥ 10GB |
+
+### Phần Mềm
+
+- **Python**: 3.9 - 3.11
+- **PostgreSQL**: 12+
+- **CUDA** (tùy chọn): 11.0+ cho GPU acceleration
+
+---
+
+## 📦 Cài Đặt Môi Trường
+
+### 1. Clone Repository
 
 ```bash
-# Train all models
-python train.py --evaluate
-python train_neural.py --evaluate
-python train_implicit_sbert.py --evaluate
-
-# Start servers individually
-python server.py              # Port 8001
-python server_neural.py       # Port 8002
-python server_implicit_sbert.py  # Port 8003
-
-# Or use launcher for Classic + Neural
-python start_servers.py
+git clone https://github.com/DUYBEGINER/Book_recommendation_system_core.git
+cd Book_recommendation_system_core/RS
 ```
 
-### Option 2: Classic Server Only (Fast, Online Learning)
+### 2. Tạo Virtual Environment
 
-```bash
-# Train classic model
-python train.py --evaluate
-
-# Start server
-python server.py
-
-# Test API
-python test_online_api.py
-```
-
-### Option 3: Neural Server Only (Semantic, Deep Learning)
-
-```bash
-# Train neural model
-python train_neural.py --evaluate
-
-# Start server
-python server_neural.py
-
-# Test API
-python test_neural_api.py
-```
-
-### Option 4: Implicit+SBERT Server (Fast & Semantic)
-
-```bash
-# Train model
-python train_implicit_sbert.py --evaluate
-
-# Start server
-python server_implicit_sbert.py
-
-# Test API
-python test_implicit_sbert_api.py
-```
-
-### Docker Compose (Recommended for Production)
-
-```bash
-# Clone and setup
-git clone <repo>
-cd book-recsys
-
-# Copy environment variables
-cp .env.example .env
-
-# Start services (trains model automatically)
-docker-compose up --build
-
-# API available at http://localhost:8001
-```
-
-### Local Development
-
-```bash
-# Install dependencies
+**Windows (PowerShell):**
+```powershell
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
-
-# Set environment variables
-export DB_URI="postgresql://user:pass@localhost:5432/bookdb"
-export DB_SCHEMA="book_recommendation_system"
-
-# Train model
-python train.py --evaluate
-
-# Start API
-uvicorn serve:app --reload --port 8001
+.\venv\Scripts\Activate.ps1
 ```
 
-## API Documentation
-
-### Server Comparison
-
-| Feature | Classic (8001) | Neural (8002) | Implicit+SBERT (8003) |
-|---------|----------------|---------------|----------------------|
-| **CF Model** | ALS + Ridge | NCF (Deep Learning) | Implicit ALS |
-| **Content Model** | Ridge Regression | SBERT | SBERT |
-| **Training Time** | ~15 sec | ~2-5 min | ~30 sec |
-| **Inference Speed** | <50ms | ~100ms | <80ms |
-| **Online Learning** | ✅ Yes | ❌ No | ❌ No |
-| **Accuracy** | Good | Best | Very Good |
-| **Semantic Understanding** | ❌ No | ✅ Yes | ✅ Yes |
-| **Resource Usage** | Low | High (GPU recommended) | Medium |
-| **Best For** | Production, real-time | High accuracy, rich data | Fast semantic search |
-
-### Classic Server (Port 8001) - ALS + Ridge
-
-See full documentation: [Online Learning Guide](docs/ONLINE_LEARNING.md)
-
-**Key Features:**
-- ✅ Online Learning (incremental updates)
-- ✅ Fast training (~15 seconds)
-- ✅ Fast inference (<50ms)
-- ✅ Low resource usage
-
-### Neural Server (Port 8002) - NCF + SBERT
-
-See full documentation: [Neural Server Guide](docs/NEURAL_SERVER.md)
-
-**Key Features:**
-- ✅ Semantic understanding (SBERT embeddings)
-- ✅ Deep learning (Neural Collaborative Filtering)
-- ✅ Best accuracy on large datasets
-- ⚠️ Requires batch retraining (no online learning)
-
-### Implicit+SBERT Server (Port 8003) - Fast & Semantic
-
-**Key Features:**
-- ✅ Semantic understanding (SBERT embeddings)
-- ✅ Fast Implicit ALS collaborative filtering
-- ✅ Good balance of speed and accuracy
-- ⚠️ Requires batch retraining (no online learning)
-
-### Endpoints (Both Servers)
-
-#### GET /api/v1/health
-Health check
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "models_loaded": true
-}
+**Linux/Mac:**
+```bash
+python3 -m venv venv
+source venv/bin/activate
 ```
 
-#### GET /api/v1/recommendations
-Get personalized recommendations
-
-**Parameters:**
-- `user_id` (int): User ID
-- `limit` (int, default=10): Number of recommendations
-
-**Response:**
-```json
-{
-  "user_id": 123,
-  "limit": 10,
-  "items": [
-    {
-      "book_id": 42,
-      "score": 0.912,
-      "reasons": {"cf": 0.62, "content": 0.29, "pop": 0.01}
-    }
-  ]
-}
-```
-
-#### GET /api/v1/similar
-Get similar books (content-based)
-
-**Parameters:**
-- `book_id` (int): Book ID
-- `limit` (int, default=10): Number of results
-
-**Response:**
-```json
-{
-  "book_id": 42,
-  "items": [
-    {"book_id": 99, "score": 0.81}
-  ]
-}
-```
-
-#### POST /api/v1/feedback
-Record user interaction
-
-**Body:**
-```json
-{
-  "user_id": 123,
-  "book_id": 42,
-  "event": "view",  // "view", "favorite", "bookmark", "rate"
-  "rating_value": 5  // optional, only for "rate" event
-}
-```
-
-#### POST /api/v1/retrain
-Trigger model retraining (admin)
-
-**Response:**
-```json
-{
-  "status": "retraining scheduled"
-}
-```
-
-## Training
-
-### Classic Model (ALS + Ridge)
+### 3. Cài Đặt Dependencies
 
 ```bash
-python train.py \
-  --alpha 0.6 \
-  --ridge-alpha 1.0 \
-  --evaluate \
-  --test-ratio 0.2
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-### Neural Model (NCF + SBERT)
+**Dependencies chính:**
+- `implicit`: Collaborative filtering (ALS)
+- `torch`: PyTorch cho NCF
+- `sentence-transformers`: SBERT embeddings
+- `fastapi`, `uvicorn`: Web API
+- `scikit-learn`, `pandas`, `numpy`: Data processing
+- `psycopg2-binary`, `sqlalchemy`: Database
+
+---
+
+## 🗄️ Cấu Hình Database
+
+### 1. Tạo File `.env`
+
+Tạo file `.env` trong thư mục `RS/`:
+
+```env
+# Database Configuration
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=book_recommendation_db
+DB_USER=postgres
+DB_PASSWORD=your_password
+DB_SCHEMA=book_recommendation_system
+
+# Model Configuration
+ALPHA=0.6
+ARTIFACTS_DIR=./artifacts
+```
+
+### 2. Cấu Trúc Database
+
+Hệ thống yêu cầu các bảng sau trong schema `book_recommendation_system`:
+
+**Bảng `books`, `authors`, `book_authors`, `genres`, `book_genres`:**
+- Được nêu trong hướng dẫn source backend
+
+### 3. Kiểm Tra Kết Nối
+
+```bash
+python -c "from src.data.db_loader import DatabaseLoader; from src.utils.config import get_settings; s = get_settings(); loader = DatabaseLoader(s.db_uri, s.db_schema); print(f'Books: {len(loader.load_books())}'); print('✅ Database connected!')"
+```
+
+---
+
+## 🚂 Huấn Luyện Mô Hình
+
+### Model 1: HybridImplicitSBERT (ALS + SBERT)
+
+#### Huấn Luyện Cơ Bản
+
+```bash
+python train_implicit_sbert.py
+```
+
+#### Huấn Luyện Với Đánh Giá
+
+```bash
+python train_implicit_sbert.py --evaluate --test-ratio 0.2
+```
+
+#### Tùy Chỉnh Tham Số
+
+```bash
+python train_implicit_sbert.py \
+  --alpha 0.4 \
+  --als-factors 64 \
+  --als-iterations 30 \
+  --als-regularization 0.01 \
+  --artifacts-dir ./artifacts_implicit_sbert \
+  --evaluate
+```
+
+**Tham số quan trọng:**
+
+| Tham Số | Mô Tả | Giá Trị Mặc Định | Khuyến Nghị |
+|---------|-------|------------------|-------------|
+| `--alpha` | Trọng số ALS (0-1), SBERT = 1-alpha | 0.4 | 0.3-0.5 |
+| `--als-factors` | Số chiều latent factors | 64 | 32-128 |
+| `--als-iterations` | Số vòng lặp ALS | 30 | 20-50 |
+| `--als-regularization` | Hệ số regularization | 0.01 | 0.001-0.1 |
+| `--device` | Device (cuda/cpu) | auto | cuda nếu có GPU |
+---
+
+### Model 2: HybridNeural (NCF + SBERT)
+
+#### Huấn Luyện Cơ Bản
+
+```bash
+python train_neural.py
+```
+
+#### Huấn Luyện Với Đánh Giá
+
+```bash
+python train_neural.py --evaluate --test-ratio 0.2
+```
+
+#### Tùy Chỉnh Tham Số
 
 ```bash
 python train_neural.py \
   --alpha 0.6 \
   --gmf-dim 64 \
   --ncf-epochs 20 \
-  --evaluate \
-  --test-ratio 0.2
+  --ncf-batch-size 256 \
+  --device cuda \
+  --artifacts-dir ./artifacts_neural \
+  --evaluate
 ```
 
-**Metrics reported:**
-- HR@K (Hit Rate)
-- NDCG@K (Normalized Discounted Cumulative Gain)
-- Coverage (catalog coverage)
+**Tham số quan trọng:**
 
-## Architecture
+| Tham Số | Mô Tả | Giá Trị Mặc Định | Khuyến Nghị |
+|---------|-------|------------------|-------------|
+| `--alpha` | Trọng số NCF (0-1), SBERT = 1-alpha | 0.6 | 0.5-0.7 |
+| `--gmf-dim` | Số chiều GMF embedding | 64 | 32-128 |
+| `--ncf-epochs` | Số epochs huấn luyện NCF | 20 | 10-30 |
+| `--ncf-batch-size` | Batch size cho NCF | 256 | 128-512 |
+| `--device` | Device (cuda/cpu) | auto | cuda (bắt buộc GPU) |
 
-### System Overview
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                  Client Application                      │
-└────────────┬────────────────────────────┬────────────────┘
-             │                            │
-             ↓                            ↓
-   ┌─────────────────┐        ┌─────────────────────┐
-   │ Classic Server  │        │  Neural Server      │
-   │  Port 8001      │        │   Port 8002         │
-   │                 │        │                     │
-   │ • ALS + Ridge   │        │ • NCF + SBERT       │
-   │ • Online Learn  │        │ • Deep Learning     │
-   │ • Fast          │        │ • Semantic          │
-   └────────┬────────┘        └──────────┬──────────┘
-            │                            │
-            └────────────┬───────────────┘
-                         ↓
-              ┌──────────────────────┐
-              │   PostgreSQL DB      │
-              │                      │
-              │ • Books              │
-              │ • Interactions       │
-              │ • User Profiles      │
-              └──────────────────────┘
+---
+
+## 🚀 Khởi Động Servers
+
+### Server 1: HybridImplicitSBERT (Port 8003)
+
+**Khởi động:**
+```bash
+python server_implicit_sbert.py
 ```
 
-### Components
+**Output (ví dụ):**
+```
+🚀 Starting Hybrid Implicit ALS + SBERT Recommender Server...
+Loading Implicit ALS + SBERT models from ./artifacts_implicit_sbert...
+✅ Models loaded successfully!
+  ALS users: 1000
+  ALS items: 4500
+  SBERT books: 5000
+  SBERT profiles: 1000
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+```
 
-1. **Data Layer** (`src/data/`)
-   - SQL loaders for books and interactions
-   - Supports ratings, reading history, favorites, bookmarks
+### Server 2: HybridNeural (Port 8002)
 
-2. **Feature Engineering** (`src/features/`)
-   - Text processing (Vietnamese diacritics handling)
-   - TF-IDF vectorization (unigrams + bigrams)
+**Khởi động:**
+```bash
+python server_neural.py
+```
 
-3. **Models** (`src/models/`)
-   - **Classic**: 
-     - Collaborative Filtering: Implicit ALS
-     - Content-based: Ridge Regression
-     - Hybrid: `HybridRecommender` (with online learning)
-   - **Neural**:
-     - Collaborative Filtering: Neural CF (NeuMF)
-     - Content-based: SBERT Embeddings
-     - Hybrid: `HybridNeuralRecommender`
+**Output:**
+```
+🚀 Starting Hybrid Neural Recommender Server...
+Loading neural models from ./artifacts_neural...
+✅ Neural models loaded successfully!
+  NCF users: 1000
+  NCF items: 4500
+  SBERT books: 5000
+  SBERT profiles: 1000
+INFO:     Uvicorn running on http://0.0.0.0:8002 (Press CTRL+C to quit)
+```
 
-4. **API** (`src/api/`)
-   - FastAPI routes
-   - Pydantic schemas
-   - OpenAPI documentation
+### Chạy Đồng Thời Nhiều Servers
 
-### Hybrid Scoring
+**Windows (PowerShell):**
+```powershell
+# Terminal 1
+python server_implicit_sbert.py
+
+# Terminal 2 (mở terminal mới)
+python server_neural.py
+```
+
+## 🧪 Kiểm Tra API
+
+### Health Check
+
+**HybridImplicitSBERT (Port 8003):**
+```bash
+curl http://localhost:8003/api/v1/health
+```
+
+**HybridNeural (Port 8002):**
+```bash
+curl http://localhost:8002/api/v1/health
+```
+
+**Response mẫu:**
+```json
+{
+  "status": "healthy",
+  "model_loaded": true,
+  "als_users": 1000,
+  "als_items": 4500,
+  "sbert_books": 5000,
+  "sbert_profiles": 1000
+}
+```
+
+### Gợi Ý ClicitSBERT(ví dụ)
+
+```bash
+# HybridImplicitSBERT
+curl "http://localhost:8003/api/v1/recommendations?user_id=123&limit=10"
+
+# HybridNeural
+curl "http://localhost:8002/api/v1/recommendations?user_id=123&limit=10"
+```
+
+**Response mẫu:**
+```json
+{
+  "user_id": 123,
+  "recommendations": [
+    {
+      "book_id": 456,
+      "score": 0.8765,
+      "reasons": {
+        "als": 0.85,
+        "sbert": 0.65,
+        "pop": 0.0
+      }
+    },
+    ...
+  ],
+  "count": 10
+}
+```
+
+### Sách Tương Tự (SBERT)
+
+```bash
+curl "http://localhost:8003/api/v1/similar?book_id=456&limit=5"
+```
+
+**Response:**
+```json
+{
+  "book_id": 456,
+  "similar_books": [
+    {
+      "book_id": 789,
+      "score": 0.9234,
+      "source": "sbert_similarity"
+    },
+    ...
+  ]
+}
+```
+
+### Gợi Ý Đa Dạng (Chỉ HybridImplicitSBERT)
+
+```bash
+curl "http://localhost:8003/api/v1/diversity?book_id=456&limit=5"
+```
+
+**Response:**
+```json
+{
+  "book_id": 456,
+  "items": [
+    {
+      "book_id": 789,
+      "rating": 4.5,
+      "score": 0.8523,
+      "metadata": {
+        "genre_diversity": 0.85,
+        "author_diversity": 0.72
+      }
+    },
+    ...
+  ]
+}
+```
+
+### Ghi Nhận Feedback (Online Learning - Chỉ ImplicitSBERT)
+
+```bash
+curl -X POST "http://localhost:8003/api/v1/feedback" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": 123,
+    "book_id": 456,
+    "event": "rating",
+    "rating_value": 5
+  }'
+```
+
+**Các loại event:**
+- `rating`: Đánh giá (rating_value: 1-5)
+- `favorite`: Yêu thích (rating_value: 0 để bỏ yêu thích)
+- `history`: Lịch sử đọc
+
+### Trạng Thái Online Learning
+
+```bash
+curl "http://localhost:8003/api/v1/online-learning/status"
+```
+
+**Response:**
+```json
+{
+  "enabled": true,
+  "buffer_size": 45,
+  "buffer_capacity": 100,
+  "buffer_full": false,
+  "note": "Only SBERT profiles updated incrementally. ALS requires full retrain."
+}
+```
+
+### Trigger Incremental Update (Manual)
+
+```bash
+curl -X POST "http://localhost:8003/api/v1/online-learning/update?force=true"
+```
+
+---
+
+## 🎯 Tham Số Tối Ưu
+
+### Lựa Chọn Mô Hình
+
+**Chọn HybridImplicitSBERT khi:**
+- Hệ thống yêu cầu phản hồi nhanh (<100ms)
+- Cần online learning để cập nhật real-time
+- Tài nguyên hạn chế (không có GPU)
+
+
+**Chọn HybridNeural khi:**
+- Ưu tiên độ chính xác cao nhất
+- Có GPU mạnh cho training
+- Có thể retrain định kỳ (không cần online learning)
+
+### Điều Chỉnh Alpha
+
+**Alpha** quyết định tỷ trọng giữa Collaborative (ALS/NCF) và Content-based (SBERT):
 
 ```python
-final_score = alpha * cf_score + (1 - alpha) * content_score
+final_score = alpha * CF_score + (1 - alpha) * SBERT_score
 ```
 
-Default `alpha=0.6` (tune on validation set)
+| Alpha | Ý Nghĩa | Khi Nào Dùng |
+|-------|---------|--------------|
+| **0.3-0.4** | Ưu tiên SBERT | Nhiều sách mới, cold-start cao |
+| **0.5** | Cân bằng | Dữ liệu đa dạng |
+| **0.6-0.7** | Ưu tiên CF | Nhiều tương tác, ít cold-start |
 
-## Integration Examples
-
-### Java (Spring Boot)
-
-```java
-@Service
-public class RecommendationService {
-    private final RestTemplate restTemplate;
-    private final String recsysUrl = "http://localhost:8001/api/v1";
-    
-    public List<Recommendation> getRecommendations(Long userId, int limit) {
-        String url = String.format("%s/recommendations?user_id=%d&limit=%d", 
-                                   recsysUrl, userId, limit);
-        RecommendationsResponse response = restTemplate.getForObject(
-            url, RecommendationsResponse.class);
-        return response.getItems();
-    }
-}
-```
-
-### Node.js (Express)
-
-```javascript
-const axios = require('axios');
-
-const RECSYS_URL = 'http://localhost:8001/api/v1';
-
-async function getRecommendations(userId, limit = 10) {
-  const response = await axios.get(`${RECSYS_URL}/recommendations`, {
-    params: { user_id: userId, limit }
-  });
-  return response.data.items;
-}
-
-async function recordFeedback(userId, bookId, event, ratingValue = null) {
-  await axios.post(`${RECSYS_URL}/feedback`, {
-    user_id: userId,
-    book_id: bookId,
-    event,
-    rating_value: ratingValue
-  });
-}
-```
-
-## Testing
-
+**Thử nghiệm:**
 ```bash
-pytest tests/ -v --cov=src
+# Test với alpha thấp (ưu tiên content)
+python train_implicit_sbert.py --alpha 0.3 --evaluate
+
+# Test với alpha cao (ưu tiên collaborative)
+python train_implicit_sbert.py --alpha 0.7 --evaluate
 ```
 
-## Performance
-
-### Classic Server (ALS + Ridge)
-- **Latency**: <50ms for top-10 (warm start, 100k books)
-- **Throughput**: ~500 req/s (single instance)
-- **Memory**: ~1GB (with 100k books, 1M interactions)
-- **Training**: ~15 seconds (full retrain)
-- **Online Update**: ~2-3 seconds (incremental)
-
-### Neural Server (NCF + SBERT)
-- **Latency**: ~150ms CPU / ~30ms GPU for top-10
-- **Throughput**: ~100 req/s CPU / ~300 req/s GPU
-- **Memory**: ~3GB (with SBERT embeddings)
-- **Training**: ~2-3 minutes (with GPU)
-- **Accuracy**: 5-10% better NDCG on large datasets
-
-### When to Use Which?
-
-| Criteria | Classic Server | Neural Server |
-|----------|---------------|---------------|
-| **Real-time updates** | ✅ Yes | ❌ No |
-| **Low latency** | ✅ <50ms | ⚠️ ~150ms |
-| **Semantic understanding** | ⚠️ Limited | ✅ Excellent |
-| **Small dataset (<10k)** | ✅ Better | ⚠️ Overfit risk |
-| **Large dataset (>100k)** | ✅ Good | ✅ Better |
-| **Resource constrained** | ✅ Low | ❌ High |
-
-## Configuration
-
-All settings in `.env` file:
-
-```bash
-DB_URI=postgresql://...
-DB_SCHEMA=book_recommendation_system
-ALPHA=0.6  # CF weight
-CF_FACTORS=64
-CF_ITERATIONS=30
-ARTIFACTS_DIR=./artifacts
-```
-
-## License
-
-MIT
+**Cập nhật:** 2025-11-05
