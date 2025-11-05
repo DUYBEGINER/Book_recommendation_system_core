@@ -4,26 +4,6 @@ Tài liệu này hướng dẫn chi tiết cách huấn luyện và triển khai
 - **HybridImplicitSBERT**: Kết hợp Implicit ALS + SBERT
 - **HybridNeural**: Kết hợp Neural Collaborative Filtering (NCF) + SBERT
 
----
-
-## 🖥️ Yêu Cầu Hệ Thống
-
-### Phần Cứng Khuyến Nghị
-
-| Thành Phần | HybridImplicitSBERT | HybridNeural |
-|------------|---------------------|--------------|
-| **RAM** | ≥ 8GB | ≥ 16GB |
-| **CPU** | 4+ cores | 8+ cores |
-| **GPU** | Không bắt buộc | Khuyến nghị (CUDA) |
-| **Disk** | ≥ 5GB | ≥ 10GB |
-
-### Phần Mềm
-
-- **Python**: 3.9 - 3.11
-- **PostgreSQL**: 12+
-- **CUDA** (tùy chọn): 11.0+ cho GPU acceleration
-
----
 
 ## 📦 Cài Đặt Môi Trường
 
