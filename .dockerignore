@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+.mypy_cache/
+.venv/
+env/
+venv/
+.git/
+.github/
+docs/
+scripts/
+artifacts/
+artifacts_implicit_sbert/
+artifacts_neural/
+recsys.log
