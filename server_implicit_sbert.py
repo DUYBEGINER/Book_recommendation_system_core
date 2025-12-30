@@ -89,4 +89,4 @@ app.include_router(router, prefix="/api/v1", tags=["implicit-sbert-recommendatio
 
 if __name__ == "__main__":
     logger.info("🚀 Starting Hybrid Implicit ALS + SBERT Recommender Server...")
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8003)

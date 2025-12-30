@@ -555,19 +555,22 @@ class HybridNeuralRecommender:
 
         return False
 
-    def incremental_update(self, force: bool = False):
+    def incremental_update(self, force: bool = False) -> list:
         """
         Apply buffered interactions to SBERT user profiles.
 
         NCF model is not updated here (requires full retraining).
+        
+        Returns:
+            List of user IDs that were updated.
         """
         if not self.online_learning:
             logger.warning("Online learning disabled; skipping incremental update.")
-            return
+            return []
 
         if not self.interaction_buffer:
             logger.info("Online learning buffer empty; nothing to update.")
-            return
+            return []
 
         if not force and len(self.interaction_buffer) < self.buffer_size:
             logger.info(
@@ -576,12 +579,15 @@ class HybridNeuralRecommender:
                 len(self.interaction_buffer),
                 self.buffer_size,
             )
-            return
+            return []
 
         logger.info(
             "Applying %d buffered interactions to SBERT user profiles...",
             len(self.interaction_buffer),
         )
+
+        # Collect unique user IDs that will be updated
+        updated_user_ids = list(set(entry["user_id"] for entry in self.interaction_buffer))
 
         if self.content_model:
             for entry in self.interaction_buffer:
@@ -602,9 +608,13 @@ class HybridNeuralRecommender:
         self.interaction_buffer = []
         logger.info(
             "Online learning update complete. Cleared %d buffered interactions. "
+            "Updated user IDs: %s. "
             "Reminder: NCF model still uses the previous training snapshot.",
             processed,
+            updated_user_ids,
         )
+        
+        return updated_user_ids
 
     def get_buffer_status(self) -> Dict[str, object]:
         """Return current buffer statistics for monitoring."""

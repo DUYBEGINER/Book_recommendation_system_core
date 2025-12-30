@@ -7,6 +7,7 @@ from src.models.hybrid_implicit_sbert import HybridImplicitSBERTRecommender
 from src.data.db_loader import DatabaseLoader
 from src.utils.config import get_settings
 from src.utils.logging_config import logger
+from src.utils.callback import notify_retrain_complete_sync, notify_incremental_update_sync
 from pathlib import Path
 from typing import Optional
 
@@ -167,6 +168,9 @@ async def record_feedback(request: FeedbackRequest):
     
     # Add to online learning buffer (if enabled)
     if rec.online_learning:
+        # Get buffer before to track which users will be updated if buffer triggers
+        buffer_before = [i['user_id'] for i in rec.interaction_buffer]
+        
         buffer_triggered = rec.add_interaction(
             user_id=request.user_id,
             book_id=request.book_id,
@@ -175,6 +179,13 @@ async def record_feedback(request: FeedbackRequest):
         )
         
         buffer_status = rec.get_buffer_status()
+        
+        # If buffer triggered update, notify backend for cache invalidation
+        if buffer_triggered:
+            # Include current user in the list of updated users
+            updated_user_ids = list(set(buffer_before + [request.user_id]))
+            logger.info(f"📤 Buffer triggered, notifying backend about {len(updated_user_ids)} updated users...")
+            notify_incremental_update_sync(updated_user_ids)
         
         return {
             "status": "recorded",
@@ -242,7 +253,7 @@ async def trigger_incremental_update(force: bool = False):
     
     buffer_status_before = rec.get_buffer_status()
     
-    rec.incremental_update(force=force)
+    updated_user_ids = rec.incremental_update(force=force)
     
     buffer_status_after = rec.get_buffer_status()
     processed = max(
@@ -252,11 +263,17 @@ async def trigger_incremental_update(force: bool = False):
     )
     status = "updated" if processed > 0 else "skipped"
     
+    # Notify Java backend about updated users for cache invalidation
+    if status == "updated" and updated_user_ids:
+        logger.info(f"📤 Notifying backend about incremental update for {len(updated_user_ids)} users...")
+        notify_incremental_update_sync(updated_user_ids)
+    
     response = {
         "status": status,
         "before": buffer_status_before,
         "after": buffer_status_after,
         "interactions_processed": processed,
+        "updated_user_ids": updated_user_ids if updated_user_ids else [],
         "note": "Only SBERT profiles updated. ALS requires full retrain."
     }
     
@@ -397,6 +414,10 @@ async def retrain_models():
         recommender.save(artifacts_dir)
         
         logger.info("✅ Background retraining completed!")
+        
+        # Notify Java backend to invalidate cache
+        logger.info("📤 Notifying backend about retrain completion...")
+        notify_retrain_complete_sync(model_key="implicit")
         
     except Exception as e:
         logger.error(f"❌ Retraining failed: {e}")

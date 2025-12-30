@@ -510,7 +510,7 @@ class HybridImplicitSBERTRecommender:
         
         return False
     
-    def incremental_update(self, force: bool = False):
+    def incremental_update(self, force: bool = False) -> list:
         """
         Incrementally update SBERT user profiles with buffered interactions
         
@@ -518,21 +518,27 @@ class HybridImplicitSBERTRecommender:
         
         Args:
             force: Force update even if buffer is not full
+            
+        Returns:
+            List of user IDs that were updated
         """
         if not self.online_learning:
             logger.warning("Online learning is disabled")
-            return
+            return []
         
         if len(self.interaction_buffer) == 0:
             logger.info("Buffer is empty, nothing to update")
-            return
+            return []
         
         if not force and len(self.interaction_buffer) < self.buffer_size:
             logger.info(f"Buffer not full ({len(self.interaction_buffer)}/{self.buffer_size}), "
                        f"skipping update (use force=True to override)")
-            return
+            return []
         
         logger.info(f"Starting incremental update with {len(self.interaction_buffer)} interactions...")
+        
+        # Collect unique user IDs that will be updated
+        updated_user_ids = list(set(interaction['user_id'] for interaction in self.interaction_buffer))
         
         # Update SBERT user profiles only
         if self.content_model:
@@ -558,7 +564,10 @@ class HybridImplicitSBERTRecommender:
         self.interaction_buffer = []
         
         logger.info(f"✅ Incremental update completed, cleared {buffer_count} interactions from buffer")
+        logger.info(f"📤 Updated user IDs: {updated_user_ids}")
         logger.info("⚠️  Note: ALS model NOT updated (requires full retrain)")
+        
+        return updated_user_ids
     
     def get_buffer_status(self) -> Dict:
         """Get online learning buffer status"""
