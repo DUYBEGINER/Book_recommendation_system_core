@@ -1,6 +1,7 @@
 # ==================== src/utils/config.py ====================
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from pydantic import computed_field
 
 class Settings(BaseSettings):
     # Database
@@ -8,9 +9,14 @@ class Settings(BaseSettings):
     db_port: int = 5432
     db_name: str = "book_recommendation_db"
     db_user: str = "postgres"
-    db_password: str = "123"
-    db_uri: str = "postgresql://postgres:123@localhost:5432/book_recommendation_db"
+    db_password: str  # No default - must be set via environment variable
     db_schema: str = "book_recommendation_system"
+    
+    @computed_field
+    @property
+    def db_uri(self) -> str:
+        """Dynamically construct database URI from components"""
+        return f"postgresql://{self.db_user}:{self.db_password}@localhost:{self.db_port}/{self.db_name}"
 
     # Model parameters
     cf_factors: int = 64
